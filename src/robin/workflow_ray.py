@@ -5037,7 +5037,16 @@ async def submit_existing_paths(
     ignore_patterns: Optional[List[str]] = None,
     recursive: bool = True,
     work_dir: Optional[str] = None,
+    seen: Optional[Set[str]] = None,
 ) -> None:
+    """Submit every matching file under ``paths`` for processing.
+
+    ``seen`` is the watcher's record of files already submitted this session -
+    pass it so a folder added twice does not submit its BAMs twice. The
+    on-disk ledger cannot cover this on its own: it only records a BAM once
+    that BAM's analysis has *finished*, leaving the whole first pass
+    unprotected while it is still in flight.
+    """
     # Fetch reference and target_panel once before processing files (performance optimization)
     coord_reference = None
     coord_target_panel = None
@@ -5057,6 +5066,15 @@ async def submit_existing_paths(
         recursive=recursive,
     )
 
+    def _claim(path: str) -> bool:
+        """Claim a file for submission, or report it as already claimed."""
+        if seen is None:
+            return True
+        if path in seen:
+            return False
+        seen.add(path)
+        return True
+
     seed_jobs: List[Job] = []
     itd_config: Optional[Dict[str, Any]] = None
     if work_dir:
@@ -5072,8 +5090,10 @@ async def submit_existing_paths(
     for p in paths:
         pth = Path(p)
         if pth.is_file():
-            if _matches_any_pattern(pth, patterns) and _matches_no_ignores(
-                pth, ignore_patterns
+            if (
+                _matches_any_pattern(pth, patterns)
+                and _matches_no_ignores(pth, ignore_patterns)
+                and _claim(str(pth))
             ):
                 jobs = default_file_classifier(str(pth), plan, coord_target_panel)
                 if work_dir:
@@ -5106,6 +5126,8 @@ async def submit_existing_paths(
                 if not _matches_any_pattern(f, patterns) or not _matches_no_ignores(
                     f, ignore_patterns
                 ):
+                    continue
+                if not _claim(str(f)):
                     continue
                 jobs = default_file_classifier(str(f), plan, coord_target_panel)
                 if work_dir:
@@ -5935,6 +5957,15 @@ def add_watch_path(new_path: str) -> Tuple[bool, str]:
                     ignore_patterns=ignore_patterns,
                     recursive=recursive,
                     work_dir=work_dir,
+                    # Adding the same folder twice must not submit its BAMs
+                    # twice. The folders are still rescanned so that files the
+                    # watcher missed are picked up; only files already
+                    # submitted this session are skipped.
+                    seen=(
+                        _GLOBAL_WATCHER.processed
+                        if _GLOBAL_WATCHER is not None
+                        else None
+                    ),
                 )
             )
         except Exception as e:
@@ -6399,22 +6430,13 @@ async def run(
     if gui_publish_task is not None:
         tasks.append(gui_publish_task)
 
-    # Now submit existing paths (this will run while monitor displays progress)
-    if process_existing and paths:
-        await submit_existing_paths(
-            coord,
-            paths,
-            plan,
-            patterns=patterns,
-            ignore_patterns=ignore_patterns,
-            recursive=recursive,
-            work_dir=work_dir,
-        )
-
+    # Build the watcher before the initial submission so both share one record
+    # of what has been submitted. Otherwise a file that is still being written
+    # is submitted here, then submitted again by the on_modified event that
+    # follows, and its reads land in the sample's totals twice.
     observer = None
     watcher = None
     if watch and paths:
-        observer = Observer()
         watcher = RayFileWatcher(
             coord,
             plan,
@@ -6425,6 +6447,22 @@ async def run(
             work_dir=work_dir,
             reference=str(reference) if reference else None,
         )
+
+    # Now submit existing paths (this will run while monitor displays progress)
+    if process_existing and paths:
+        await submit_existing_paths(
+            coord,
+            paths,
+            plan,
+            patterns=patterns,
+            ignore_patterns=ignore_patterns,
+            recursive=recursive,
+            work_dir=work_dir,
+            seen=watcher.processed if watcher is not None else None,
+        )
+
+    if watcher is not None:
+        observer = Observer()
         for p in paths:
             if Path(p).is_dir():
                 watch = observer.schedule(watcher, p, recursive=recursive)
