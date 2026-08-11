@@ -58,6 +58,8 @@ from tqdm import tqdm
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
+from robin.analysis.processed_ledger import already_processed, record_processed
+
 try:
     from rich.progress import (
         BarColumn,
@@ -524,6 +526,66 @@ def _preprocessing_allows_downstream(
     if downstream_type == "fusion":
         return bool(preprocessing_result.get("has_supplementary_reads", False))
     return True
+
+
+# Analyses that add each BAM's contribution to a running per-sample total on
+# disk. Re-running one for a BAM already counted multiplies that sample's
+# coverage, so these are the types the processed-BAM ledger guards.
+ACCUMULATING_TYPES: Set[str] = {
+    "bed_conversion",
+    "mgmt",
+    "cnv",
+    "target",
+    "fusion",
+    "itd",
+}
+
+
+def _job_source_bams(job: "Job", ctx: "WorkflowContext") -> List[str]:
+    """The BAM paths a finished job consumed.
+
+    Batched jobs carry their siblings on the primary context, so the whole
+    batch has to be recorded, not just the file the job was named after.
+    """
+    try:
+        batched = job.context.metadata.get("_batched_job")
+        if batched is not None:
+            return list(batched.get_filepaths())
+    except Exception:
+        pass
+    filepath = getattr(ctx, "filepath", None)
+    return [filepath] if filepath else []
+
+
+def _already_accumulated(ctx: "WorkflowContext", job_type: str) -> bool:
+    """Whether this BAM is already in the sample's totals for ``job_type``."""
+    if job_type not in ACCUMULATING_TYPES:
+        return False
+    try:
+        return already_processed(
+            ctx.metadata.get("work_dir"),
+            ctx.get_sample_id(),
+            job_type,
+            ctx.filepath,
+        )
+    except Exception:
+        return False
+
+
+def _record_accumulated(job: "Job", ctx: "WorkflowContext") -> None:
+    """Record a successful accumulation so a later watch does not repeat it."""
+    if job.job_type not in ACCUMULATING_TYPES:
+        return
+    try:
+        work_dir = ctx.metadata.get("work_dir") or job.context.metadata.get("work_dir")
+        record_processed(
+            work_dir,
+            ctx.get_sample_id(),
+            job.job_type,
+            _job_source_bams(job, ctx),
+        )
+    except Exception:
+        pass
 
 
 # Per-sample de-duplication to avoid output races. Ensure only one job of these types
@@ -3310,6 +3372,12 @@ class Coordinator:
             else ("skipped" if is_skipped else "failed")
         )
 
+        # Only a completed accumulation is recorded. A failure stays absent so
+        # that watching the folder again retries it - ROBIN has no retry of its
+        # own, so this is the job's only second chance.
+        if status == "completed":
+            _record_accumulated(job, ctx)
+
         if job.job_type == "preprocessing":
             for metadata_key, title in (
                 ("modbase_warning", "Methylation Model Warning"),
@@ -3635,6 +3703,13 @@ class Coordinator:
 
                             prep_result = ctx.results["preprocessing"]
                             if not _preprocessing_allows_downstream(prep_result, t):
+                                continue
+
+                            # This BAM's contribution may already be in the
+                            # sample's totals from an earlier watch of the same
+                            # folder. The accumulators add rather than replace,
+                            # so re-running one would multiply the coverage.
+                            if _already_accumulated(ctx, t):
                                 continue
 
                         # Every fan-out branch owns its context. Batching stores
