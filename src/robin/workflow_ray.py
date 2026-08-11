@@ -557,6 +557,60 @@ def _job_source_bams(job: "Job", ctx: "WorkflowContext") -> List[str]:
     return [filepath] if filepath else []
 
 
+def _job_is_fully_accumulated(job: "Job", job_type: str, work_dir: Optional[str]) -> bool:
+    """Whether every BAM this job would consume is already in the totals.
+
+    This is the backstop, and the only guard that cannot be routed around:
+    the fan-out gate protects jobs created by the normal preprocessing chain,
+    but every handler of every type - however its job was created - runs
+    through ``_wrap_real_handler``. Checking here means a new dispatch path
+    added later cannot reintroduce double counting by accident.
+
+    A partly-accumulated batch is allowed through rather than pruned. Removing
+    contexts from a live batch would desynchronise the progress accounting
+    that reads ``get_file_count()``, and the fan-out gate filters recorded
+    BAMs before batching, so mixed batches should not form. One is logged
+    loudly rather than handled silently.
+    """
+    if job_type not in ACCUMULATING_TYPES or not work_dir:
+        return False
+    try:
+        sample_id = job.context.get_sample_id()
+    except Exception:
+        return False
+
+    try:
+        batched = job.context.metadata.get("_batched_job")
+    except Exception:
+        batched = None
+
+    try:
+        if batched is not None:
+            paths = list(batched.get_filepaths())
+        else:
+            paths = [job.context.filepath] if job.context.filepath else []
+        if not paths:
+            return False
+
+        done = [
+            already_processed(work_dir, sample_id, job_type, path) for path in paths
+        ]
+        if all(done):
+            return True
+        if any(done):
+            logging.getLogger("robin.ledger").warning(
+                "%s batch for %s mixes %d already-accumulated BAMs with %d new ones; "
+                "letting it through, which will double-count the former",
+                job_type,
+                sample_id,
+                sum(done),
+                len(done) - sum(done),
+            )
+        return False
+    except Exception:
+        return False
+
+
 def _already_accumulated(ctx: "WorkflowContext", job_type: str) -> bool:
     """Whether this BAM is already in the sample's totals for ``job_type``."""
     if job_type not in ACCUMULATING_TYPES:
@@ -1114,6 +1168,21 @@ def _wrap_real_handler(
                         os.makedirs(os.path.join(work_dir, sid), exist_ok=True)
                 except Exception:
                     pass
+            # Last line of defence against double counting. The fan-out gate
+            # catches the normal path; this catches every other way a job can
+            # reach a handler that adds to a running per-sample total.
+            if _job_is_fully_accumulated(job, job_type, work_dir):
+                logger.info(
+                    "%s already accumulated for %s; not counting it again",
+                    job_type,
+                    os.path.basename(job.context.filepath or ""),
+                )
+                job.context.add_result(
+                    job_type,
+                    {"status": "already_accumulated", "files_processed": 0},
+                )
+                return job.context
+
             try:
                 sig = inspect.signature(py_handler)
                 # Check if handler accepts reference parameter

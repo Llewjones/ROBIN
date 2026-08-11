@@ -29,6 +29,7 @@ from robin.workflow_ray import (
     RayFileWatcher,
     WorkflowContext,
     _already_accumulated,
+    _job_is_fully_accumulated,
     _job_source_bams,
     _record_accumulated,
     submit_existing_paths,
@@ -276,3 +277,95 @@ def test_a_bulk_submitted_file_is_not_handled_again_by_the_watcher(
 
     watcher._handle(str(folder / "run_0.bam"))
     assert watcher._pending_jobs == []
+
+
+def test_a_job_reaching_a_handler_by_any_route_is_still_blocked(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    """The backstop. The fan-out gate only guards jobs created by the normal
+    preprocessing chain; this runs inside the handler wrapper, which every job
+    of every type must pass through however it was created."""
+    from robin.workflow_ray import _wrap_real_handler
+
+    bam = _bam(tmp_path, "run_0.bam")
+    ctx = _context(work_dir, bam)
+    ctx.add_metadata("target_panel", "rCNS2")
+    record_processed(str(work_dir), SAMPLE, "target", [bam])
+
+    ran = []
+    handler = _wrap_real_handler(lambda job: ran.append(job), "target")
+    returned = handler(_job("target", ctx))
+
+    assert ran == []
+    assert returned.results["target"]["status"] == "already_accumulated"
+
+
+def test_the_backstop_lets_an_unaccumulated_bam_through(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    from robin.workflow_ray import _wrap_real_handler
+
+    ctx = _context(work_dir, _bam(tmp_path, "run_0.bam"))
+    ctx.add_metadata("target_panel", "rCNS2")
+
+    ran = []
+    handler = _wrap_real_handler(lambda job: ran.append(job), "target")
+    handler(_job("target", ctx))
+
+    assert len(ran) == 1
+
+
+def test_the_backstop_ignores_types_that_do_not_accumulate(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    """Classifiers replace their output rather than adding to it, so they must
+    keep running even for a BAM seen before."""
+    from robin.workflow_ray import _wrap_real_handler
+
+    bam = _bam(tmp_path, "run_0.bam")
+    ctx = _context(work_dir, bam)
+    ctx.add_metadata("target_panel", "rCNS2")
+    record_processed(str(work_dir), SAMPLE, "sturgeon", [bam])
+
+    ran = []
+    handler = _wrap_real_handler(lambda job: ran.append(job), "sturgeon")
+    handler(_job("sturgeon", ctx))
+
+    assert len(ran) == 1
+
+
+def test_a_fully_accumulated_batch_is_blocked(work_dir: Path, tmp_path: Path) -> None:
+    bams = [_bam(tmp_path, f"run_{i}.bam") for i in range(4)]
+    contexts = [_context(work_dir, path) for path in bams]
+    primary = contexts[0]
+    primary.add_metadata(
+        "_batched_job",
+        BatchedJob(1, "cnv", "cnv", ["cnv:cnv"], 0, contexts, "batch-1", SAMPLE),
+    )
+    record_processed(str(work_dir), SAMPLE, "cnv", bams)
+
+    assert _job_is_fully_accumulated(_job("cnv", primary), "cnv", str(work_dir))
+
+
+def test_a_partly_accumulated_batch_is_allowed_through(
+    work_dir: Path, tmp_path: Path
+) -> None:
+    """Pruning a live batch would desynchronise progress accounting, so a mixed
+    batch runs and is logged rather than being silently altered."""
+    bams = [_bam(tmp_path, f"run_{i}.bam") for i in range(4)]
+    contexts = [_context(work_dir, path) for path in bams]
+    primary = contexts[0]
+    primary.add_metadata(
+        "_batched_job",
+        BatchedJob(1, "cnv", "cnv", ["cnv:cnv"], 0, contexts, "batch-1", SAMPLE),
+    )
+    record_processed(str(work_dir), SAMPLE, "cnv", bams[:2])
+
+    assert not _job_is_fully_accumulated(_job("cnv", primary), "cnv", str(work_dir))
+
+
+def test_the_backstop_fails_open_without_a_work_dir(tmp_path: Path) -> None:
+    ctx = WorkflowContext(_bam(tmp_path, "run_0.bam"))
+    ctx.add_metadata("bam_metadata", {"sample_id": SAMPLE})
+
+    assert not _job_is_fully_accumulated(_job("target", ctx), "target", None)
