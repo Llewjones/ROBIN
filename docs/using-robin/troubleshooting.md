@@ -62,6 +62,20 @@ Use **Activity Monitor** — that is the **workflow monitor** in the standard se
 
 ---
 
+## “Failed to load ITD hotspots” in the log {#itd-hotspots-missing}
+
+Every ITD job logs `Failed to load ITD hotspots for panel …: No such file or directory: …/resources/itd_hotspots.hg38.json`. The curated hotspot file is missing from the install; ITD calling is skipped until it is restored (all other analyses are unaffected).
+
+Regenerate it from the packaged GENCODE annotation:
+
+```bash
+python scripts/make_itd_hotspots.py
+```
+
+This writes `src/robin/resources/itd_hotspots.hg38.json` with one window per curated gene (FLT3, BCOR, KIT, NPM1, CALR, CEBPA, EGFR, ERBB2, JAK2, NOTCH1); genes absent from the active `--target-panel` are ignored at run time. Restart the workflow afterwards. The file is required in every `[itd] region_mode` (`hotspots`, `panel` and `both` all read it), so regenerating it is the fix in all cases.
+
+---
+
 ## Still stuck {#still-stuck}
 
 - [README — Common issues](https://github.com/LooseLab/ROBIN/blob/main/README.md#common-issues)  

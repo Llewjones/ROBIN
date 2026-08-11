@@ -180,3 +180,12 @@ src/robin/models/Capper_et_al_NN_v2.pkl
 src/robin/models/pancan_devel_v5i_NN_v2.pkl
 src/robin/resources/clinvar.vcf.gz
 src/robin/resources/clinvar.vcf.gz.tbi 
+
+# Local runtime state — contains live session/auth tokens, never commit
+.nicegui/
+.claude/settings.local.json
+
+# Working documents and screenshots dropped at the repo root (root-anchored:
+# docs/images/*.png and any committed assets are unaffected)
+/*.pdf
+/*.png

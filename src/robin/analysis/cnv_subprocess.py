@@ -24,6 +24,7 @@ def run_cnv_analysis(
     mapq_filter=60,
     update_cnv_dict_path=None,
     sample_id=None,
+    bin_width=None,
 ):
     """
     Run CNV analysis using cnv_from_bam in an isolated subprocess.
@@ -97,12 +98,17 @@ def run_cnv_analysis(
         # First pass: process sample with accumulated copy numbers
         print(f"Starting Pass 1: Sample CNV extraction with {threads} threads", file=sys.stderr)
         pass1_start = time.time()
+        pass1_kwargs = {}
+        if bin_width:
+            # Forced analysis bin width from [cnv].bin_width.
+            pass1_kwargs["bin_width"] = int(bin_width)
         result = cnv_from_bam.iterate_bam_file(
             bam_path,
             _threads=threads,
             mapq_filter=mapq_filter,
             copy_numbers=copy_numbers,
             log_level=int(logging.ERROR),
+            **pass1_kwargs,
         )
         pass1_time = time.time() - pass1_start
         print(f"Pass 1 completed in {pass1_time:.2f}s (bin_width: {result.bin_width}, variance: {result.variance:.6f})", file=sys.stderr)
@@ -199,6 +205,12 @@ def main():
     parser.add_argument(
         "--mapq-filter", type=int, default=60, help="Mapping quality filter"
     )
+    parser.add_argument(
+        "--bin-width",
+        type=int,
+        default=None,
+        help="Force this analysis bin width in bp (default: sized from read depth)",
+    )
 
     args = parser.parse_args()
 
@@ -244,6 +256,7 @@ def main():
         mapq_filter=args.mapq_filter,
         update_cnv_dict_path=args.update_cnv_dict_path,
         sample_id=args.sample_id,
+        bin_width=args.bin_width,
     )
 
     # Exit with appropriate code

@@ -9,8 +9,15 @@ import json
 import logging
 import pandas as pd
 from datetime import datetime
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, PageBreak
-from reportlab.lib.pagesizes import A4
+from reportlab.platypus import (
+    BaseDocTemplate,
+    Frame,
+    PageBreak,
+    PageTemplate,
+    Paragraph,
+    Spacer,
+)
+from reportlab.lib.pagesizes import A3, A4, landscape
 from reportlab.lib.units import inch
 from .styling.styles import ReportStyles
 from robin.gui import fonts
@@ -75,6 +82,12 @@ class RobinReport:
         self.generated_at = (str(generated_at).strip() if generated_at else None) or None
         from robin.gui.plotting_preferences import (
             load_plotting_preferences,
+            resolve_cnv_chromosome_axis_log2,
+            resolve_cnv_cutoff,
+            resolve_cnv_genome_axis_log2,
+            resolve_cnv_gene_label_points,
+            resolve_cnv_gui_cutoff,
+            resolve_cnv_gui_label_orientation,
             resolve_cnv_summary_normalized,
             resolve_plotting_reference_contig_scope,
         )
@@ -91,6 +104,23 @@ class RobinReport:
         )
         self.reference_contig_scope = resolve_plotting_reference_contig_scope(
             self.plotting_preferences
+        )
+        self.cnv_chromosome_axis_log2 = resolve_cnv_chromosome_axis_log2(
+            self.plotting_preferences
+        )
+        self.cnv_genome_axis_log2 = resolve_cnv_genome_axis_log2(
+            self.plotting_preferences
+        )
+        # Review cut-off from the admin panel, applied to the report's figures,
+        # their caption and the CNV load. None means the calling thresholds.
+        self.cnv_cutoff = resolve_cnv_cutoff(
+            resolve_cnv_gui_cutoff(self.plotting_preferences)
+        )
+        self.cnv_gene_label_size = resolve_cnv_gene_label_points(
+            self.plotting_preferences
+        )
+        self.cnv_gene_labels_rotated = (
+            resolve_cnv_gui_label_orientation(self.plotting_preferences) == "rotated"
         )
         self.robin_commit = get_git_commit()
         self.clinvar_metadata = load_sample_clinvar_provenance(self.output)
@@ -147,9 +177,31 @@ class RobinReport:
         """Get the centre ID from the provided center parameter."""
         return self.center
 
+    #: Page template ids. Sections switch to the landscape one with
+    #: ``NextPageTemplate`` for figures that need the full width of a page.
+    PORTRAIT_TEMPLATE = "portrait"
+    LANDSCAPE_TEMPLATE = "landscape"
+    #: Narrower side margins on landscape pages, where the whole point is width.
+    LANDSCAPE_SIDE_MARGIN = 0.6 * inch
+    #: Paper for the landscape page. A4 keeps the whole report on one paper
+    #: size — rotating it still gives the genome-wide CNV summary 10.5in of
+    #: frame against the portrait column's 6.3in, which is the gain that
+    #: matters. A3 reached 15.3in but made the report mixed-format, which is
+    #: awkward to print.
+    LANDSCAPE_PAGESIZE = A4
+
     def _create_document(self):
-        """Create the PDF document with enhanced M3 margins and settings."""
-        return SimpleDocTemplate(
+        """Create the PDF document with enhanced M3 margins and settings.
+
+        Portrait A4 is the default. An **A3 landscape** template is registered
+        alongside it so the genome-wide CNV summary can use a full page instead
+        of being scaled down to the portrait text column.
+
+        The page is A4 rotated, so the whole report stays one paper size while
+        the figure still gets 10.5in of frame against the portrait column's
+        6.3in. The standalone Genome PDF download is the route to a wider view.
+        """
+        doc = BaseDocTemplate(
             self.filename,
             pagesize=A4,
             rightMargin=1.0 * inch,  # Enhanced from 0.75 inch
@@ -157,6 +209,37 @@ class RobinReport:
             topMargin=1.35 * inch,  # Keep existing for header compatibility
             bottomMargin=1.0 * inch,  # Enhanced from 0.75 inch
         )
+        portrait_frame = Frame(
+            doc.leftMargin,
+            doc.bottomMargin,
+            doc.width,
+            doc.height,
+            id=self.PORTRAIT_TEMPLATE,
+        )
+        landscape_size = landscape(self.LANDSCAPE_PAGESIZE)
+        side = self.LANDSCAPE_SIDE_MARGIN
+        landscape_frame = Frame(
+            side,
+            doc.bottomMargin,
+            landscape_size[0] - 2 * side,
+            landscape_size[1] - doc.topMargin - doc.bottomMargin,
+            id=self.LANDSCAPE_TEMPLATE,
+        )
+        doc.addPageTemplates(
+            [
+                PageTemplate(
+                    id=self.PORTRAIT_TEMPLATE, frames=[portrait_frame], pagesize=A4
+                ),
+                PageTemplate(
+                    id=self.LANDSCAPE_TEMPLATE,
+                    frames=[landscape_frame],
+                    pagesize=landscape_size,
+                ),
+            ]
+        )
+        #: Usable width on a landscape page, for sections sizing figures.
+        doc.landscape_width = landscape_size[0] - 2 * side
+        return doc
 
     def _initialize_sections(self):
         """Initialize all report sections."""

@@ -49,6 +49,19 @@ from robin.analysis.cnv_regional import (
 )
 from robin.analysis.itd_work import load_gene_target_coverage
 from robin.classification_config import get_cnv_thresholds
+from robin.cnv_plot_style import (
+    CNV_LOG2_MAX_AXIS_SPAN,
+    CNV_LOG2_MIN_AXIS_SPAN,
+    assign_label_lanes,
+    clamp_band_for_markers,
+    cnv_axis_tick_spec,
+    cnv_chromosome_axis_window,
+    cnv_reference_levels,
+    cnv_segment_points,
+    gene_crosses_cutoff,
+    horizontal_label_proximity_frac,
+    snap_axis_window_to_ticks,
+)
 
 # Same chromosome set as reporting (plotting.py): chr0–chr22, chrX, chrY only
 CNV_PLOT_CONTIGS = frozenset(
@@ -82,6 +95,62 @@ _CNV_Y_VALUE_FORMATTER_JS = (
 )
 _CONFIGURED_GENES_SERIES_NAME = "configured_genes_highlight"
 _CONFIGURED_GENES_LABELS_SERIES_NAME = "configured_genes_labels"
+_CNV_TREND_SERIES_PREFIX = "cnv_trend"
+_CNV_REFERENCE_SERIES_NAME = "cnv_reference_lines"
+_CNV_CENTROMERE_SERIES_NAME = "cnv_centromere_lines"
+_CNV_OVERLAY_SERIES_NAMES = frozenset(
+    {
+        "centromeres_highlight",
+        "cytobands_highlight",
+        _CONFIGURED_GENES_SERIES_NAME,
+        _CONFIGURED_GENES_LABELS_SERIES_NAME,
+        _CNV_REFERENCE_SERIES_NAME,
+        _CNV_CENTROMERE_SERIES_NAME,
+    }
+)
+
+# Y-axis window bounds. The log2 window is symmetric about zero so a gain and the
+# equivalent loss sit the same distance from the baseline (WGM/conumee convention).
+_CNV_LOG_Y_MIN_SPAN = CNV_LOG2_MIN_AXIS_SPAN
+_CNV_LOG_Y_MAX_SPAN = CNV_LOG2_MAX_AXIS_SPAN
+_CNV_LINEAR_Y_MAX_FACTOR = 4.0
+_CNV_DIFF_Y_MIN_SPAN = 1.0
+_CNV_DIFF_Y_MAX_SPAN = 6.0
+_CNV_LARGE_SCATTER_THRESHOLD = 2000
+_CNV_PROGRESSIVE_CHUNK = 4000
+# ECharts draws this many minor divisions between labelled ticks.
+_CNV_AXIS_MINOR_SPLIT = 2
+# Room for the mirrored right-hand tick labels.
+_CNV_GRID_RIGHT_WITH_MIRROR = "6%"
+
+# Gene names are drawn rotated inside the panel (methylation-array convention),
+# so nothing is reserved for them and the axis stays driven by the data.
+_CNV_GENE_MARKER_SIZE = 9
+# Rough width of a bold character as a fraction of font size, used to offset a
+# rotated label clear of its own marker.
+_CNV_LABEL_CHAR_WIDTH_RATIO = 0.62
+# Fallback ECharts label size when no preference is set.
+_CNV_LABEL_DEFAULT_PX = 11.0
+# Nominal plotted width in px, used to judge how wide a horizontal label is
+# relative to the panel when deciding which names need stacking.
+_CNV_GUI_PANEL_WIDTH_PX = 1400.0
+# Lane step for stacked horizontal labels, as a multiple of the font size.
+_CNV_LABEL_LANE_SPACING = 1.35
+# A rotated name runs along the y-axis, so its extent scales with its length.
+# Used only to decide which side of the marker has room for it.
+_CNV_LABEL_EXTENT_PER_CHAR = 0.03
+_CNV_LABEL_EXTENT_MAX = 0.4
+
+# Segment line over the bin cloud, matching the report figures.
+_CNV_TREND_COLOR_DARK = "#f8fafc"
+_CNV_TREND_COLOR_LIGHT = "#1E3A5F"
+# Gain/loss calling cut-offs. Deliberately high-contrast: these are the lines the
+# reporting scientists read gains and losses against.
+_CNV_CUTOFF_COLOR_LIGHT = "#B45309"
+_CNV_CUTOFF_COLOR_DARK = "#fbbf24"
+# p/q arm divider: faint enough to sit behind the data.
+_CNV_CENTROMERE_COLOR_LIGHT = "rgba(100, 116, 139, 0.55)"
+_CNV_CENTROMERE_COLOR_DARK = "rgba(148, 163, 184, 0.5)"
 _CNV_GENE_COVERAGE_FILTER_ALL = "all"
 _CNV_GENE_COVERAGE_FILTER_OUTLIERS = "outliers"
 _CNV_GENE_COVERAGE_FILTERS = (
@@ -90,7 +159,6 @@ _CNV_GENE_COVERAGE_FILTERS = (
 )
 _CNV_GENE_GAIN_COLOR = "#DC2626"
 _CNV_GENE_LOSS_COLOR = "#2563EB"
-_CNV_GENE_OUTLIER_SD = 3.0
 # Soft safety only — axis auto-scales to highlighted genes within this envelope.
 _CNV_LOLLIPOP_LOG_Y_SOFT_CAP = 20.0
 _CNV_LOLLIPOP_LINEAR_Y_SOFT_CAP_FACTOR = 20.0
@@ -303,17 +371,129 @@ def _upsert_configured_gene_series(
     )
 
 
+def _resolve_cnv_labels_rotated(value: Any) -> bool:
+    """True when gene names should be drawn rotated rather than horizontally."""
+    try:
+        from robin.gui.plotting_preferences import cnv_label_is_rotated
+
+        return cnv_label_is_rotated(value)
+    except Exception:
+        logging.debug("Could not resolve label orientation %r", value, exc_info=True)
+        return True
+
+
+def _resolve_cnv_gene_label_points(value: Any) -> Optional[float]:
+    """Resolve the stored gene label size to matplotlib points, for exports."""
+    try:
+        from robin.gui.plotting_preferences import resolve_cnv_gene_label_size
+
+        return resolve_cnv_gene_label_size(value)
+    except Exception:
+        logging.debug("Could not resolve gene label points %r", value, exc_info=True)
+        return None
+
+
+def _resolve_cnv_gene_label_px(value: Any) -> Optional[float]:
+    """Resolve the stored gene label size to an ECharts px size."""
+    try:
+        from robin.gui.plotting_preferences import cnv_gene_label_size_px
+
+        return cnv_gene_label_size_px(value)
+    except Exception:
+        logging.debug("Could not resolve gene label size %r", value, exc_info=True)
+        return None
+
+
+def _resolve_cnv_chrom_axis(value: Any) -> Optional[float]:
+    """Resolve the stored per-chromosome Y-range to a log2 half-span (None = auto)."""
+    try:
+        from robin.gui.plotting_preferences import resolve_cnv_chrom_axis
+
+        return resolve_cnv_chrom_axis(value)
+    except Exception:
+        logging.debug("Could not resolve CNV chromosome axis %r", value, exc_info=True)
+        return None
+
+
+def _cutoff_suffix_text(cutoff_override: Optional[float] = None) -> str:
+    """Cut-off note for a GUI heading whose rows move with the cut-off."""
+    try:
+        from robin.gui.plotting_preferences import cnv_cutoff_heading_suffix
+
+        return cnv_cutoff_heading_suffix(cutoff_override)
+    except Exception:
+        return ""
+
+
+def _set_cutoff_heading(label, base: str, cutoff_override: Optional[float]) -> None:
+    """Rewrite a heading so it always names the cut-off its rows were built at."""
+    try:
+        label.set_text(base + _cutoff_suffix_text(cutoff_override))
+    except Exception:
+        logging.debug("Could not update the cut-off heading", exc_info=True)
+
+
+def _resolve_cnv_cutoff(value: Any) -> Optional[float]:
+    """Resolve the stored cut-off setting to a log2 magnitude (None = calling)."""
+    try:
+        from robin.gui.plotting_preferences import resolve_cnv_cutoff
+
+        return resolve_cnv_cutoff(value)
+    except Exception:
+        logging.debug("Could not resolve CNV cut-off %r", value, exc_info=True)
+        return None
+
+
+def _cnv_cutoff_thresholds(
+    chromosome: str,
+    sex_estimate: str,
+    cutoff_override: Optional[float] = None,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Gain/loss cut-off in force, honouring the user's cut-off selection.
+
+    An override moves everything the cut-off drives together: the drawn lines,
+    the point colouring, the Outliers filter, the called regions, the events and
+    regional tables, the gene states and the CNV load. One control, one number,
+    every output.
+    """
+    if cutoff_override is not None:
+        magnitude = abs(float(cutoff_override))
+        return magnitude, -magnitude
+    try:
+        return get_cnv_thresholds(
+            chromosome or "chr1", sex_estimate or "Unknown"
+        )
+    except Exception:
+        logging.debug("Could not resolve CNV thresholds for %s", chromosome, exc_info=True)
+        return None, None
+
+
 def _is_configured_gene_cnv_outlier(
     cnv_val: float,
-    mean_cnv: float,
-    std_cnv: float,
+    *,
+    chromosome: str,
+    sex_estimate: str,
+    use_log: bool,
+    baseline: float,
+    cutoff_override: Optional[float] = None,
 ) -> bool:
-    """True when gene CNV differs from the local expected average by >3 SD."""
-    if not np.isfinite(cnv_val) or not np.isfinite(mean_cnv):
+    """True when a gene crosses the gain/loss cut-off currently in force.
+
+    Same test as the cut-off lines drawn on the plot, taken against the
+    genome-wide baseline — so a gene on a gained chromosome is reported as gained.
+    """
+    gain_threshold, loss_threshold = _cnv_cutoff_thresholds(
+        chromosome, sex_estimate, cutoff_override
+    )
+    if gain_threshold is None or loss_threshold is None:
         return False
-    if not np.isfinite(std_cnv) or std_cnv < 1e-6:
-        return abs(cnv_val - mean_cnv) > 0.5
-    return abs(cnv_val - mean_cnv) > _CNV_GENE_OUTLIER_SD * std_cnv
+    return gene_crosses_cutoff(
+        cnv_val,
+        gain_threshold=gain_threshold,
+        loss_threshold=loss_threshold,
+        use_log=use_log,
+        baseline=baseline,
+    )
 
 
 def _configured_gene_region_cnv(
@@ -341,54 +521,16 @@ def _configured_gene_region_cnv(
     return float(np.nanmax(finite))
 
 
-def _chrom_track_stats(
-    values: np.ndarray,
-    *,
-    use_log: bool,
-) -> Tuple[float, float]:
-    """Mean/std for outlier + direction calls on one chromosome track."""
-    vals = np.asarray(values, dtype=float)
-    finite = vals[np.isfinite(vals)]
-    default_mean = 0.0 if use_log else 2.0
-    if finite.size == 0:
-        return default_mean, 1.0
-    return float(np.mean(finite)), float(np.std(finite))
-
-
 def _configured_gene_cnv_direction(
     cnv_val: float,
     *,
     use_log: bool,
-    mean_cnv: float,
+    baseline: float,
 ) -> str:
-    """Classify gene CNV as gain or loss relative to the expected average."""
+    """Classify gene CNV as gain or loss against the genome-wide baseline."""
     if use_log:
         return "gain" if cnv_val >= 0.0 else "loss"
-    return "gain" if cnv_val >= mean_cnv else "loss"
-
-
-def _normalise_coverage_to_cnv_axis(
-    coverage: float,
-    *,
-    mean_cov: float,
-    scale_mean_cnv: float,
-    use_log: bool,
-) -> Optional[float]:
-    """Map target depth onto the CNV y-axis for visual comparison.
-
-    Linear/ploidy: ``scale_mean_cnv * (cov / mean_cov)`` so mean coverage sits
-    at the CNV mean. Log2: ``log2(cov / mean_cov)`` so mean coverage sits at 0.
-    """
-    if not np.isfinite(coverage) or coverage <= 0:
-        return None
-    if not np.isfinite(mean_cov) or mean_cov <= 0:
-        return None
-    ratio = float(coverage) / float(mean_cov)
-    if use_log:
-        return float(np.log2(ratio))
-    if not np.isfinite(scale_mean_cnv):
-        return None
-    return float(scale_mean_cnv) * ratio
+    return "gain" if cnv_val >= baseline else "loss"
 
 
 def _build_configured_gene_coverage_points(
@@ -402,19 +544,24 @@ def _build_configured_gene_coverage_points(
     filter_mode: str,
     use_log: bool,
     scale_mean_cnv: float,
+    sex_estimate: str = "Unknown",
+    cutoff_override: Optional[float] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[float]]:
-    """Join configured genes to target coverage for abs-chart lollipops."""
-    if not gene_locations or not coverage_by_gene:
+    """Mark configured genes at their own copy-number value on the CNV track.
+
+    The marker sits on the profile, as in the methylation-array CNV plots the team
+    reads alongside ROBIN. Target sequencing depth is carried in the tooltip rather
+    than as the marker height: mapping depth onto the copy-number axis put markers
+    several log2 units off the profile and forced the axis open to reach them.
+    """
+    if not gene_locations:
         return [], None
 
-    cov_lookup = {str(k).casefold(): float(v) for k, v in coverage_by_gene.items()}
+    cov_lookup = {str(k).casefold(): float(v) for k, v in (coverage_by_gene or {}).items()}
     cov_vals = [v for v in cov_lookup.values() if np.isfinite(v) and v > 0]
     mean_cov = float(np.mean(cov_vals)) if cov_vals else None
-    if mean_cov is None:
-        return [], None
 
     baseline_y = 0.0 if use_log else float(scale_mean_cnv)
-    chrom_stats: Dict[str, Tuple[float, float]] = {}
     points: List[Dict[str, Any]] = []
     for row in _configured_genes_on_chrom(gene_locations, selected):
         gene = str(row["gene"])
@@ -422,14 +569,9 @@ def _build_configured_gene_coverage_points(
         if selected == "All" and chrom not in chrom_offsets and chrom not in abs_plot_map:
             continue
         coverage = cov_lookup.get(gene.casefold())
-        if coverage is None or not np.isfinite(coverage):
-            continue
         track = abs_plot_map.get(chrom)
         if track is None:
             continue
-        if chrom not in chrom_stats:
-            chrom_stats[chrom] = _chrom_track_stats(track, use_log=use_log)
-        mean_cnv, std_cnv = chrom_stats[chrom]
         cnv_val = _configured_gene_region_cnv(
             track,
             start_pos=float(row["start_pos"]),
@@ -440,17 +582,26 @@ def _build_configured_gene_coverage_points(
         if cnv_val is None:
             continue
         if filter_mode == _CNV_GENE_COVERAGE_FILTER_OUTLIERS and not (
-            _is_configured_gene_cnv_outlier(cnv_val, mean_cnv, std_cnv)
+            _is_configured_gene_cnv_outlier(
+                cnv_val,
+                chromosome=chrom,
+                sex_estimate=sex_estimate,
+                use_log=use_log,
+                baseline=float(scale_mean_cnv),
+                cutoff_override=cutoff_override,
+            )
         ):
             continue
-        y_norm = _normalise_coverage_to_cnv_axis(
-            float(coverage),
-            mean_cov=mean_cov,
-            scale_mean_cnv=float(scale_mean_cnv),
-            use_log=use_log,
-        )
-        if y_norm is None:
-            continue
+        # Depth relative to the panel mean, for the tooltip only.
+        coverage_ratio = None
+        if (
+            coverage is not None
+            and np.isfinite(coverage)
+            and mean_cov
+            and np.isfinite(mean_cov)
+            and mean_cov > 0
+        ):
+            coverage_ratio = float(coverage) / float(mean_cov)
         start_pos = float(row["start_pos"])
         end_pos = float(row["end_pos"])
         midpoint = (start_pos + end_pos) / 2.0
@@ -460,94 +611,116 @@ def _build_configured_gene_coverage_points(
                 "gene": gene,
                 "chrom": chrom,
                 "x": midpoint + offset,
-                "coverage": float(coverage),
-                "y": float(y_norm),
+                "coverage": (
+                    float(coverage)
+                    if coverage is not None and np.isfinite(coverage)
+                    else None
+                ),
+                "coverage_ratio": coverage_ratio,
+                # The marker sits on the profile at the gene's own CNV value.
+                "y": float(cnv_val),
                 "baseline_y": float(baseline_y),
                 "cnv_val": float(cnv_val),
                 "direction": _configured_gene_cnv_direction(
                     float(cnv_val),
                     use_log=use_log,
-                    mean_cnv=mean_cnv,
+                    baseline=float(scale_mean_cnv),
                 ),
             }
         )
     return points, mean_cov
 
 
-def _stagger_lollipop_label_distances(
-    points: Sequence[Dict[str, Any]],
+def _cnv_scatter_value_range(
+    series_list: Sequence[Dict[str, Any]],
     *,
-    base_distance: int = 10,
-    step: int = 14,
-    x_proximity_frac: float = 0.018,
-) -> List[int]:
-    """Push nearby gene labels apart vertically (pixel distance from the head)."""
-    if not points:
-        return []
-    xs = [float(p["x"]) for p in points]
-    x_span = max(xs) - min(xs) if len(xs) > 1 else 1.0
-    proximity = max(x_span * x_proximity_frac, 1.0)
-    order = sorted(range(len(points)), key=lambda idx: xs[idx])
-    distances = [base_distance] * len(points)
-    occupied: List[Tuple[float, int]] = []
-    for idx in order:
-        x_pos = xs[idx]
-        lane = 0
-        while any(
-            abs(x_pos - other_x) < proximity and lane == other_lane
-            for other_x, other_lane in occupied
-        ):
-            lane += 1
-            if lane > 8:
-                break
-        occupied.append((x_pos, lane))
-        distances[idx] = base_distance + lane * step
-    return distances
+    percentile: float = 99.0,
+) -> Optional[Tuple[float, float]]:
+    """Robust value envelope of the plotted CNV bins.
+
+    Uses percentiles rather than min/max so a single homozygous deletion cannot
+    collapse the rest of the profile into a few pixels.
+    """
+    values: List[float] = []
+    for series in series_list:
+        if not isinstance(series, dict) or series.get("type") != "scatter":
+            continue
+        if series.get("name") in _CNV_OVERLAY_SERIES_NAMES:
+            continue
+        for point in series.get("data") or []:
+            if not isinstance(point, (list, tuple)) or len(point) < 2:
+                continue
+            val = point[1]
+            if val is None:
+                continue
+            fval = float(val)
+            if np.isfinite(fval):
+                values.append(fval)
+    if not values:
+        return None
+    arr = np.asarray(values, dtype=float)
+    lo = float(np.percentile(arr, 100.0 - float(percentile)))
+    hi = float(np.percentile(arr, float(percentile)))
+    if hi <= lo:
+        pad = max(abs(hi) * 0.1, 0.1)
+        lo, hi = lo - pad, hi + pad
+    return lo, hi
 
 
 def _lollipop_baseline_y_range(
     *,
     use_log: bool,
     scale_mean_cnv: float,
+    data_range: Optional[Tuple[float, float]] = None,
 ) -> Tuple[float, float]:
-    """Minimum CNV-friendly window before expanding for highlighted genes."""
+    """CNV data band before gene-label gutters are reserved.
+
+    Log2 mode keeps the window symmetric about zero (conumee/WGM convention) so a
+    gain and the matching loss are the same distance from the baseline.
+    """
     if use_log:
-        return (-2.0, 2.0)
-    return (0.0, max(4.0, float(scale_mean_cnv) * 1.75))
+        span = _CNV_LOG_Y_MIN_SPAN
+        if data_range is not None:
+            span = max(span, abs(float(data_range[0])), abs(float(data_range[1])))
+        span = min(span, _CNV_LOG_Y_MAX_SPAN)
+        return (-span, span)
+    lo = 0.0
+    hi = max(4.0, float(scale_mean_cnv) * 1.75)
+    if data_range is not None:
+        hi = max(hi, float(data_range[1]) + 0.25)
+        hi = min(hi, max(4.0, float(scale_mean_cnv) * _CNV_LINEAR_Y_MAX_FACTOR))
+    return (lo, hi)
 
 
-def _lollipop_view_y_range(
-    points: Sequence[Dict[str, Any]],
+def _lollipop_label_side(
+    point: Dict[str, Any],
     *,
-    use_log: bool,
-    scale_mean_cnv: float,
-) -> Tuple[float, float]:
-    """Auto-scale the Y window so highlighted genes and nearby labels stay in range."""
-    base_lo, base_hi = _lollipop_baseline_y_range(
-        use_log=use_log,
-        scale_mean_cnv=scale_mean_cnv,
-    )
-    gene_ys = [
-        float(p["y"])
-        for p in points
-        if p.get("y") is not None and np.isfinite(float(p["y"]))
-    ]
-    if not gene_ys:
-        span = max(base_hi - base_lo, 1.0)
-        return float(base_lo - 0.1 * span), float(base_hi + 0.1 * span)
+    y_lo: Optional[float] = None,
+    y_hi: Optional[float] = None,
+) -> str:
+    """Which way a rotated gene name reads: gains up, losses down.
 
-    g_lo = float(min(gene_ys))
-    g_hi = float(max(gene_ys))
-    lo = min(float(base_lo), g_lo)
-    hi = max(float(base_hi), g_hi)
-    span = max(hi - lo, 1.0)
-    # Room for labels placed just above gains / below losses.
-    label_pad = max(0.35, 0.18 * span)
-    lo -= label_pad
-    hi += label_pad
-    if not use_log:
-        lo = max(0.0, lo)
-    return float(lo), float(hi)
+    Flipped when the preferred side has no room, so a name near the top or
+    bottom of the panel is not left running off it.
+    """
+    baseline = float(point.get("baseline_y", 0.0))
+    y_head = float(point.get("y_disp", point.get("y", 0.0)))
+    if str(point.get("direction") or "") == "loss" or y_head < baseline:
+        side = "below"
+    else:
+        side = "above"
+    if y_lo is None or y_hi is None:
+        return side
+    span = max(float(y_hi) - float(y_lo), 1e-6)
+    extent = span * min(
+        len(str(point.get("gene") or "")) * _CNV_LABEL_EXTENT_PER_CHAR,
+        _CNV_LABEL_EXTENT_MAX,
+    )
+    if side == "above" and y_head + extent > float(y_hi):
+        return "below"
+    if side == "below" and y_head - extent < float(y_lo):
+        return "above"
+    return side
 
 
 def _soft_cap_lollipop_display_y(
@@ -566,172 +739,213 @@ def _soft_cap_lollipop_display_y(
     return float(np.clip(y_norm, lo, hi)), capped
 
 
-def _layout_lollipop_label_placements(
-    points: Sequence[Dict[str, Any]],
-    *,
-    y_lo: float,
-    y_hi: float,
-    x_proximity_frac: float = 0.022,
-    n_lanes: int = 4,
-) -> List[Dict[str, Any]]:
-    """Place each gene badge beside its marker: above gains, below losses."""
-    if not points:
-        return []
-    span = max(float(y_hi) - float(y_lo), 1e-6)
-    base_offset = max(0.22, 0.08 * span)
-    lane_step = max(0.16, 0.045 * span)
-    lanes = n_lanes if len(points) > 8 else max(2, min(n_lanes, 3))
-
-    xs = [float(p["x"]) for p in points]
-    x_span = max(xs) - min(xs) if len(xs) > 1 else 1.0
-    proximity = max(x_span * x_proximity_frac, 1.0)
-    order = sorted(range(len(points)), key=lambda idx: xs[idx])
-
-    placements: List[Optional[Dict[str, Any]]] = [None] * len(points)
-    occupied: List[Tuple[float, str, int]] = []  # x, side, lane
-
-    for idx in order:
-        point = points[idx]
-        x_pos = float(point["x"])
-        y_head = float(point.get("y_disp", point.get("y", 0.0)))
-        baseline = float(point.get("baseline_y", 0.0))
-        direction = str(point.get("direction") or "")
-        # Prefer the side away from the CNV baseline / toward the stem tip.
-        if direction == "loss" or y_head < baseline:
-            side = "below"
-        else:
-            side = "above"
-
-        lane = 0
-        while any(
-            abs(x_pos - other_x) < proximity
-            and side == other_side
-            and lane == other_lane
-            for other_x, other_side, other_lane in occupied
-        ):
-            lane += 1
-            if lane >= lanes:
-                lane = lanes - 1
-                break
-        occupied.append((x_pos, side, lane))
-
-        offset = base_offset + lane * lane_step
-        if side == "above":
-            label_y = min(y_head + offset, float(y_hi) - 0.03 * span)
-            label_position = "top"
-        else:
-            label_y = max(y_head - offset, float(y_lo) + 0.03 * span)
-            label_position = "bottom"
-        placements[idx] = {
-            "y": float(label_y),
-            "side": side,
-            "position": label_position,
-        }
-
-    return [
-        p if p is not None else {"y": 0.0, "side": "above", "position": "top"}
-        for p in placements
-    ]
-
-
-def _configured_gene_coverage_lollipop_series(
+def _plan_lollipop_layout(
     points: Sequence[Dict[str, Any]],
     *,
     use_log: bool,
-    dark: bool,
     scale_mean_cnv: float,
-    view_y_lo: float,
-    view_y_hi: float,
+    data_range: Optional[Tuple[float, float]] = None,
+    fixed_axis_log2: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Plan the CNV y-window and gene-label placement.
+
+    Gene names are drawn rotated inside the panel, anchored to their marker, the
+    way the methylation-array CNV plots do it. Nothing is reserved for them, so
+    the axis is set by the copy-number data alone and keeps its fine tick
+    intervals no matter how many genes are configured.
+    """
+    band_lo, band_hi = _lollipop_baseline_y_range(
+        use_log=use_log,
+        scale_mean_cnv=scale_mean_cnv,
+        data_range=data_range,
+    )
+
+    marker_ys = [
+        float(p["y_disp"])
+        for p in points
+        if p.get("y_disp") is not None and np.isfinite(float(p["y_disp"]))
+    ]
+    if marker_ys:
+        band_lo, band_hi = clamp_band_for_markers(band_lo, band_hi, marker_ys)
+    if not use_log:
+        band_lo = max(0.0, band_lo)
+
+    if fixed_axis_log2:
+        # One window for every chromosome, so they can be compared directly.
+        y_lo, y_hi = cnv_chromosome_axis_window(
+            use_log=use_log,
+            span_log2=float(fixed_axis_log2),
+            baseline=float(scale_mean_cnv) if not use_log else 2.0,
+        )
+        ticks = cnv_axis_tick_spec(y_lo, y_hi, use_log=use_log)
+    else:
+        y_lo, y_hi = band_lo, band_hi
+        ticks = cnv_axis_tick_spec(y_lo, y_hi, use_log=use_log)
+        y_lo, y_hi = snap_axis_window_to_ticks(
+            y_lo,
+            y_hi,
+            ticks.major,
+            clamp_min=0.0 if not use_log else None,
+        )
+        ticks = cnv_axis_tick_spec(y_lo, y_hi, use_log=use_log)
+
+    # A gene outside the window is pinned to the edge so it stays visible; the
+    # tooltip flags it as capped.
+    clamped: List[Dict[str, Any]] = []
+    for point in points:
+        y_disp = float(point["y_disp"])
+        y_clamped = float(np.clip(y_disp, y_lo, y_hi))
+        clamped.append(
+            {
+                **point,
+                "y_disp": y_clamped,
+                "capped": bool(point.get("capped")) or y_clamped != y_disp,
+            }
+        )
+    points = clamped
+
+    placements = [
+        {
+            "side": _lollipop_label_side(p, y_lo=y_lo, y_hi=y_hi),
+            "y": float(p["y_disp"]),
+        }
+        for p in points
+    ]
+
+    return {
+        "y_lo": float(y_lo),
+        "y_hi": float(y_hi),
+        "band_lo": float(band_lo),
+        "band_hi": float(band_hi),
+        "ticks": ticks,
+        "placements": placements,
+        "points": points,
+    }
+
+
+def _prepare_lollipop_points(
+    points: Sequence[Dict[str, Any]],
+    *,
+    use_log: bool,
+    scale_mean_cnv: float,
 ) -> List[Dict[str, Any]]:
-    """Build head + callout-label series on the shared CNV axis."""
-    if not points:
-        return []
-
-    label_bg = "rgba(15, 23, 42, 0.94)" if dark else "rgba(255, 255, 255, 0.97)"
-    head_border = "#0f172a" if dark else "#ffffff"
-    label_font = 12 if len(points) <= 20 else 11
-
+    """Attach the soft-capped display y used for marker heads and layout."""
     prepared: List[Dict[str, Any]] = []
     for point in points:
-        y_raw = float(point["y"])
         y_disp, capped = _soft_cap_lollipop_display_y(
-            y_raw,
+            float(point["y"]),
             use_log=use_log,
             scale_mean_cnv=scale_mean_cnv,
         )
         prepared.append({**point, "y_disp": y_disp, "capped": capped})
+    return prepared
 
-    placements = _layout_lollipop_label_placements(
-        prepared,
-        y_lo=view_y_lo,
-        y_hi=view_y_hi,
+
+def _rotated_label_distance(gene: str, font_size: float) -> float:
+    """Pixel offset that clears a 90°-rotated gene name from its own marker.
+
+    ECharts rotates a label about its own centre, so a label anchored at the
+    marker would sit half on top of it. Offsetting by half the rendered text
+    length plus the marker radius puts the text alongside instead.
+    """
+    text_px = max(len(str(gene)), 1) * float(font_size) * _CNV_LABEL_CHAR_WIDTH_RATIO
+    return _CNV_GENE_MARKER_SIZE / 2.0 + 3.0 + text_px / 2.0
+
+
+def _horizontal_label_distance(font_size: float, lane: int) -> float:
+    """Pixel offset for a horizontal gene name, stepped by collision lane."""
+    return (
+        _CNV_GENE_MARKER_SIZE / 2.0
+        + 3.0
+        + int(lane) * float(font_size) * _CNV_LABEL_LANE_SPACING
     )
 
-    heads: List[Dict[str, Any]] = []
-    labels: List[Dict[str, Any]] = []
-    stems: List[Any] = []
-    leaders: List[Any] = []
 
-    for point, place in zip(prepared, placements):
+def _configured_gene_coverage_lollipop_series(
+    prepared: Sequence[Dict[str, Any]],
+    placements: Sequence[Dict[str, Any]],
+    *,
+    dark: bool,
+    use_log: bool,
+    label_size_px: Optional[float] = None,
+    rotated: bool = True,
+    x_span: Optional[float] = None,
+) -> List[Dict[str, Any]]:
+    """Gene markers on the profile, with rotated or horizontal names."""
+    if not prepared:
+        return []
+
+    halo = "#0f172a" if dark else "#ffffff"
+    base_font = float(label_size_px) if label_size_px else _CNV_LABEL_DEFAULT_PX
+    # Crowded panels shed a little size, as before.
+    label_font = base_font if len(prepared) <= 25 else base_font * 0.92
+
+    # Horizontal names are as wide as the gene symbol, so overlapping ones step
+    # into lanes; rotated names are narrow and sit on a single lane each.
+    if rotated:
+        lanes = [0] * len(prepared)
+    else:
+        lanes = assign_label_lanes(
+            [float(p["x"]) for p in prepared],
+            [str(pl.get("side") or "above") for pl in placements],
+            x_span=x_span,
+            x_proximity_frac=horizontal_label_proximity_frac(
+                [str(p["gene"]) for p in prepared],
+                font_size=label_font,
+                panel_width_pt=_CNV_GUI_PANEL_WIDTH_PX,
+            ),
+        )
+
+    marks: List[Dict[str, Any]] = []
+    stems: List[Any] = []
+
+    for point, place, lane in zip(prepared, placements, lanes):
         x_pos = float(point["x"])
         y_disp = float(point["y_disp"])
         baseline = float(point.get("baseline_y", 0.0 if use_log else 2.0))
-        label_y = float(place["y"])
         gene = str(point["gene"])
-        cov = float(point["coverage"])
         capped = bool(point.get("capped"))
         color = (
             _CNV_GENE_GAIN_COLOR
             if point.get("direction") == "gain"
             else _CNV_GENE_LOSS_COLOR
         )
-        heads.append(
+        # Read the name away from the baseline, so gains label upwards.
+        above = place.get("side") != "below"
+        marks.append(
             {
                 "name": gene,
                 "value": [x_pos, y_disp],
-                "coverage": cov,
+                "coverage": point.get("coverage"),
+                "coverageRatio": point.get("coverage_ratio"),
                 "capped": capped,
                 "itemStyle": {
                     "color": color,
-                    "borderColor": head_border,
-                    "borderWidth": 2,
-                    "shadowBlur": 5,
-                    "shadowColor": "rgba(0, 0, 0, 0.3)",
-                },
-                "label": {"show": False},
-            }
-        )
-        labels.append(
-            {
-                "name": gene,
-                "value": [x_pos, label_y],
-                "coverage": cov,
-                "capped": capped,
-                "symbol": "roundRect",
-                "symbolSize": [2, 2],
-                "itemStyle": {
-                    "color": "transparent",
-                    "borderWidth": 0,
+                    "borderColor": halo,
+                    "borderWidth": 1,
                 },
                 "label": {
                     "show": True,
                     "formatter": gene,
-                    "position": place["position"],
-                    "distance": 2,
-                    "rotate": 0,
+                    "position": "top" if above else "bottom",
+                    "distance": (
+                        _rotated_label_distance(gene, label_font)
+                        if rotated
+                        else _horizontal_label_distance(label_font, lane)
+                    ),
+                    "rotate": 90 if rotated else 0,
                     "fontSize": label_font,
                     "fontWeight": "bold",
                     "color": color,
-                    "backgroundColor": label_bg,
-                    "borderColor": color,
-                    "borderWidth": 1.5,
-                    "borderRadius": 4,
-                    "padding": [5, 8],
+                    # A halo keeps the name legible over the bin cloud without a box.
+                    "textBorderColor": halo,
+                    "textBorderWidth": 2.5,
                     "align": "center",
                     "verticalAlign": "middle",
                 },
             }
         )
+        # Thin tie back to the baseline so the name traces to a genomic position.
         stems.append(
             [
                 {
@@ -739,26 +953,11 @@ def _configured_gene_coverage_lollipop_series(
                     "lineStyle": {
                         "color": color,
                         "type": "solid",
-                        "width": 2,
-                        "opacity": 0.9,
+                        "width": 1,
+                        "opacity": 0.45,
                     },
                 },
                 {"coord": [x_pos, y_disp]},
-            ]
-        )
-        # Short leader from the marker head to the gene badge.
-        leaders.append(
-            [
-                {
-                    "coord": [x_pos, y_disp],
-                    "lineStyle": {
-                        "color": color,
-                        "type": "dashed",
-                        "width": 1.25,
-                        "opacity": 0.85,
-                    },
-                },
-                {"coord": [x_pos, label_y]},
             ]
         )
 
@@ -766,59 +965,59 @@ def _configured_gene_coverage_lollipop_series(
         "trigger": "item",
         ":formatter": (
             "(params) => { const d = params.data || {}; "
-            "const cov = Number(d.coverage); "
             "const v = params.value; "
             "const y = Array.isArray(v) ? Number(v[1]) : Number(v); "
-            "const covTxt = Number.isFinite(cov) ? cov.toFixed(1) + 'x' : 'n/a'; "
-            "const yTxt = Number.isFinite(y) ? y.toFixed(2) : ''; "
-            "const cap = d.capped ? ' (capped)' : ''; "
-            "return params.name + ': ' + covTxt + "
-            "(yTxt ? ' (norm ' + yTxt + ')' : '') + cap; }"
+            "const cov = Number(d.coverage); "
+            "const ratio = Number(d.coverageRatio); "
+            "const parts = []; "
+            "if (Number.isFinite(y)) parts.push(y.toFixed(2)); "
+            "if (Number.isFinite(cov)) { "
+            "  let c = cov.toFixed(1) + 'x'; "
+            "  if (Number.isFinite(ratio)) c += ' (' + ratio.toFixed(2) + "
+            "    '\\u00d7 panel mean)'; "
+            "  parts.push(c); } "
+            "if (d.capped) parts.push('off scale'); "
+            "return params.name + ': ' + parts.join(' \\u00b7 '); }"
         ),
     }
 
-    head_series = {
-        "type": "scatter",
-        "name": _CONFIGURED_GENES_SERIES_NAME,
-        "yAxisIndex": 0,
-        "symbolSize": 13,
-        "zlevel": 4,
-        "z": 12,
-        "clip": False,
-        "animation": False,
-        "animationDuration": 0,
-        "progressive": 0,
-        "data": heads,
-        "markLine": {
-            "symbol": "none",
+    return [
+        {
+            "type": "scatter",
+            "name": _CONFIGURED_GENES_SERIES_NAME,
+            "yAxisIndex": 0,
+            "symbolSize": _CNV_GENE_MARKER_SIZE,
+            "zlevel": 4,
+            "z": 12,
+            "clip": False,
             "animation": False,
             "animationDuration": 0,
-            "silent": True,
-            "z": 11,
-            "data": stems + leaders,
-        },
-        "tooltip": tooltip,
-    }
-    label_series = {
-        "type": "scatter",
-        "name": _CONFIGURED_GENES_LABELS_SERIES_NAME,
-        "yAxisIndex": 0,
-        "symbolSize": 1,
-        "zlevel": 5,
-        "z": 14,
-        "clip": False,
-        "animation": False,
-        "animationDuration": 0,
-        "progressive": 0,
-        "data": labels,
-        "tooltip": tooltip,
-        "silent": False,
-    }
-    return [head_series, label_series]
+            "progressive": 0,
+            "data": marks,
+            "markLine": {
+                "symbol": "none",
+                "animation": False,
+                "animationDuration": 0,
+                "silent": True,
+                "z": 11,
+                "data": stems,
+            },
+            "tooltip": tooltip,
+        }
+    ]
 
 
-def _apply_cnv_abs_y_window(chart: Any, y_lo: float, y_hi: float) -> None:
-    """Pin the abs-chart Y axis and slider to a marker-aware window."""
+def _apply_cnv_abs_y_window(
+    chart: Any,
+    y_lo: float,
+    y_hi: float,
+    *,
+    ticks: Optional[Any] = None,
+    use_log: bool = False,
+) -> None:
+    """Pin the CNV Y axis, its tick ladder, the mirrored axis and the slider."""
+    if ticks is None:
+        ticks = cnv_axis_tick_spec(y_lo, y_hi, use_log=use_log)
     try:
         dz_list = chart.options.get("dataZoom")
         if isinstance(dz_list, list) and len(dz_list) > 1 and isinstance(dz_list[1], dict):
@@ -832,9 +1031,62 @@ def _apply_cnv_abs_y_window(chart: Any, y_lo: float, y_hi: float) -> None:
     try:
         y_axes = chart.options.get("yAxis")
         if isinstance(y_axes, list) and y_axes and isinstance(y_axes[0], dict):
-            y_axes[0]["min"] = float(y_lo)
-            y_axes[0]["max"] = float(y_hi)
-            y_axes[0]["scale"] = False
+            axis = y_axes[0]
+            axis["min"] = float(y_lo)
+            axis["max"] = float(y_hi)
+            axis["scale"] = False
+            axis["interval"] = float(ticks.major)
+            axis["minorTick"] = {
+                "show": True,
+                "splitNumber": _CNV_AXIS_MINOR_SPLIT,
+            }
+            axis["minorSplitLine"] = {"show": True}
+    except Exception:
+        pass
+    _apply_cnv_mirror_y_axis(chart, y_lo, y_hi, ticks=ticks)
+
+
+def _apply_cnv_mirror_y_axis(
+    chart: Any,
+    y_lo: float,
+    y_hi: float,
+    *,
+    ticks: Any,
+) -> None:
+    """Mirror the copy-number scale on the right-hand edge (WGM/conumee style).
+
+    Reading a gain or loss off a genome-wide panel means tracking a point back to
+    a tick that can be a metre of screen away; duplicating the labels on the right
+    halves that distance.
+    """
+    try:
+        y_axes = chart.options.get("yAxis")
+        if not isinstance(y_axes, list) or len(y_axes) < 2:
+            return
+        mirror = y_axes[1]
+        if not isinstance(mirror, dict):
+            return
+        mirror.update(
+            {
+                "type": "value",
+                "name": "",
+                "position": "right",
+                "show": True,
+                "min": float(y_lo),
+                "max": float(y_hi),
+                "scale": False,
+                "interval": float(ticks.major),
+                "axisTick": {"show": True},
+                "minorTick": {"show": True, "splitNumber": _CNV_AXIS_MINOR_SPLIT},
+                # Gridlines are drawn once, by the primary axis.
+                "splitLine": {"show": False},
+                "minorSplitLine": {"show": False},
+                "axisLabel": {**(mirror.get("axisLabel") or {}), "show": True},
+            }
+        )
+        grid = chart.options.get("grid")
+        if isinstance(grid, dict):
+            grid["right"] = _CNV_GRID_RIGHT_WITH_MIRROR
     except Exception:
         pass
 
@@ -846,8 +1098,13 @@ def _upsert_configured_gene_coverage_lollipops(
     use_log: bool,
     dark: bool,
     scale_mean_cnv: float,
+    data_range: Optional[Tuple[float, float]] = None,
+    fixed_axis_log2: Optional[float] = None,
+    label_size_px: Optional[float] = None,
+    labels_rotated: bool = True,
+    x_span: Optional[float] = None,
 ) -> None:
-    """Replace the abs-chart gene series with coverage lollipops (or remove it)."""
+    """Replace the abs-chart gene markers, or remove them when there are none."""
     series = chart.options.get("series")
     if not isinstance(series, list):
         return
@@ -860,46 +1117,376 @@ def _upsert_configured_gene_coverage_lollipops(
             _CONFIGURED_GENES_LABELS_SERIES_NAME,
         )
     ]
-    if not points:
-        # No markers: restore a CNV-friendly baseline window.
-        base_lo, base_hi = _lollipop_baseline_y_range(
-            use_log=use_log,
-            scale_mean_cnv=scale_mean_cnv,
-        )
-        span = max(base_hi - base_lo, 1.0)
-        _apply_cnv_abs_y_window(chart, base_lo, base_hi + 0.15 * span)
-        return
-    view_y_lo, view_y_hi = _lollipop_view_y_range(
+    prepared = _prepare_lollipop_points(
         points,
         use_log=use_log,
         scale_mean_cnv=scale_mean_cnv,
     )
-    _apply_cnv_abs_y_window(chart, view_y_lo, view_y_hi)
+    layout = _plan_lollipop_layout(
+        prepared,
+        use_log=use_log,
+        scale_mean_cnv=scale_mean_cnv,
+        data_range=data_range,
+        fixed_axis_log2=fixed_axis_log2,
+    )
+    _apply_cnv_abs_y_window(
+        chart,
+        layout["y_lo"],
+        layout["y_hi"],
+        ticks=layout["ticks"],
+        use_log=use_log,
+    )
+    if not prepared:
+        return
     chart.options["series"].extend(
         _configured_gene_coverage_lollipop_series(
-            points,
-            use_log=use_log,
+            layout["points"],
+            layout["placements"],
             dark=dark,
-            scale_mean_cnv=scale_mean_cnv,
-            view_y_lo=view_y_lo,
-            view_y_hi=view_y_hi,
+            use_log=use_log,
+            label_size_px=label_size_px,
+            rotated=labels_rotated,
+            x_span=x_span,
         )
     )
 
 
-def _set_cnv_abs_coverage_axis(chart: Any, *, show: bool = False) -> None:
-    """Keep the unused right-hand axis hidden (lollipops share the CNV axis)."""
-    y_axes = chart.options.get("yAxis")
-    if not isinstance(y_axes, list) or len(y_axes) < 2:
+def cnv_export_settings(launcher: Any, sample_dir: Any) -> Tuple[bool, Dict[str, Any]]:
+    """Resolve the render settings for a downloaded CNV PDF.
+
+    Returns ``(use_log2, kwargs)`` for :func:`robin.reporting.cnv_export.build_cnv_pdf`.
+
+    Everything resolves through the same overlay the PDF report uses: the live
+    CNV panel wins where the reviewer has set something, and anything untouched
+    falls back to the admin default. Reading the panel state alone meant a
+    sample whose CNV section had not been opened this session exported on
+    linear / outliers / calling-default / auto-fit no matter what the menus and
+    the admin defaults said, so a download could disagree with the plot beside
+    the button and with the report for the same sample.
+    """
+    from robin.gui.plotting_preferences import (
+        cnv_label_is_rotated,
+        resolve_cnv_chromosome_axis_log2,
+        resolve_cnv_cutoff,
+        resolve_cnv_gene_label_points,
+        resolve_cnv_genome_axis_log2,
+        resolve_cnv_gui_cutoff,
+        resolve_cnv_gui_gene_coverage_filter,
+        resolve_cnv_gui_label_orientation,
+        resolve_cnv_gui_show_trend_line,
+        resolve_cnv_gui_y_scale,
+    )
+
+    try:
+        prefs = launcher._plotting_preferences_for_sample(sample_dir)
+    except Exception:
+        logging.debug(
+            "Falling back to admin plotting preferences for the CNV export",
+            exc_info=True,
+        )
+        prefs = getattr(launcher, "plotting_preferences", None)
+
+    # y_scale is a live-only toggle with no preference field of its own, so it
+    # falls back to the scale the admin default implies.
+    try:
+        state = launcher._cnv_state.get(str(sample_dir)) or {}
+    except Exception:
+        state = {}
+    y_scale = state.get("y_scale")
+    if y_scale not in ("linear", "log"):
+        y_scale = resolve_cnv_gui_y_scale(prefs)
+
+    gene_filter = resolve_cnv_gui_gene_coverage_filter(prefs)
+    kwargs: Dict[str, Any] = dict(
+        cutoff_override=resolve_cnv_cutoff(resolve_cnv_gui_cutoff(prefs)),
+        outliers_only=gene_filter == _CNV_GENE_COVERAGE_FILTER_OUTLIERS,
+        show_trend=resolve_cnv_gui_show_trend_line(prefs),
+        fixed_axis_log2=resolve_cnv_chromosome_axis_log2(prefs),
+        genome_axis_log2=resolve_cnv_genome_axis_log2(prefs),
+        gene_label_size=resolve_cnv_gene_label_points(prefs),
+        gene_labels_rotated=cnv_label_is_rotated(
+            resolve_cnv_gui_label_orientation(prefs)
+        ),
+    )
+    return str(y_scale) == "log", kwargs
+
+
+def _cnv_export_allowed(launcher: Any) -> bool:
+    """Honour the launcher's export permission gate, as the other downloads do."""
+    gate = getattr(launcher, "_require_export_or_notify", None)
+    if gate is None:
+        return True
+    try:
+        return bool(gate())
+    except Exception:
+        logging.debug("Export permission check failed", exc_info=True)
+        return False
+
+
+def _cnv_diff_y_window(
+    data_range: Optional[Tuple[float, float]],
+) -> Tuple[float, float]:
+    """Symmetric window for the difference panel, sized to the data it holds."""
+    span = _CNV_DIFF_Y_MIN_SPAN
+    if data_range is not None:
+        span = max(span, abs(float(data_range[0])), abs(float(data_range[1])))
+    span = min(span, _CNV_DIFF_Y_MAX_SPAN)
+    return (-span, span)
+
+
+def _cnv_trend_color(dark: bool) -> str:
+    return _CNV_TREND_COLOR_DARK if dark else _CNV_TREND_COLOR_LIGHT
+
+
+def _cnv_trend_series(
+    contig: str,
+    x_values: Sequence[float],
+    y_values: Sequence[float],
+    *,
+    dark: bool,
+) -> Optional[Dict[str, Any]]:
+    """Piecewise-constant segment bars over one chromosome's CNV bins.
+
+    Flat within a segment and detached between them, as on the methylation-array
+    CNV plots: a rolling average wanders with the noise, and a connected step line
+    spikes wherever a short unmappable run forms its own segment.
+    """
+    data = cnv_segment_points(x_values, y_values)
+    if not data:
+        return None
+    return {
+        "type": "line",
+        "name": f"{_CNV_TREND_SERIES_PREFIX}:{contig}",
+        "yAxisIndex": 0,
+        "data": data,
+        "showSymbol": False,
+        "symbol": "none",
+        "smooth": False,
+        # Each segment is its own horizontal bar; nulls keep the risers away.
+        "connectNulls": False,
+        "silent": True,
+        "animation": False,
+        "z": 9,
+        "zlevel": 3,
+        "lineStyle": {
+            "color": _cnv_trend_color(dark),
+            "width": 1.6,
+            "opacity": 0.95,
+        },
+        "emphasis": {"disabled": True},
+        "tooltip": {"show": False},
+    }
+
+
+def _cnv_reference_line_series(
+    *,
+    use_log: bool,
+    dark: bool,
+    chromosome: str,
+    sex_estimate: str,
+    y_lo: float,
+    y_hi: float,
+    cutoff_override: Optional[float] = None,
+) -> Optional[Dict[str, Any]]:
+    """Baseline and gain/loss cut-off guides for the CNV panel."""
+    gain_threshold: Optional[float] = None
+    loss_threshold: Optional[float] = None
+    if use_log:
+        gain_threshold, loss_threshold = _cnv_cutoff_thresholds(
+            chromosome if chromosome and chromosome != "All" else "chr1",
+            sex_estimate,
+            cutoff_override,
+        )
+
+    levels = cnv_reference_levels(
+        use_log=use_log,
+        gain_threshold=gain_threshold,
+        loss_threshold=loss_threshold,
+        y_lo=y_lo,
+        y_hi=y_hi,
+    )
+    if not levels:
+        return None
+
+    palette = _cnv_echart_palette(dark)
+    cutoff_color = _CNV_CUTOFF_COLOR_DARK if dark else _CNV_CUTOFF_COLOR_LIGHT
+    styles = {
+        "baseline": {
+            "color": palette["text"],
+            "type": "solid",
+            "width": 1.5,
+            "opacity": 0.9,
+        },
+        # Calling cut-offs: dashed so they read as guides, but dark and thick
+        # enough to be unmissable against the bin cloud.
+        "threshold": {
+            "color": cutoff_color,
+            "type": [7, 5],
+            "width": 1.8,
+            "opacity": 0.95,
+        },
+        "ploidy": {
+            "color": palette["muted"],
+            "type": "dotted",
+            "width": 1.0,
+            "opacity": 0.5,
+        },
+    }
+    mark_data = []
+    for value, kind in levels:
+        style = dict(styles.get(kind, styles["ploidy"]))
+        label = {"show": False}
+        if kind == "threshold":
+            # Name the cut-off at the end of its own line.
+            label = {
+                "show": True,
+                "position": "insideEndTop" if value > 0 else "insideEndBottom",
+                "formatter": f"{value:+g}",
+                "color": style["color"],
+                "fontSize": 10,
+                "fontWeight": "bold",
+                "padding": [0, 4, 0, 0],
+            }
+        mark_data.append(
+            {
+                "yAxis": float(value),
+                "lineStyle": style,
+                "label": label,
+            }
+        )
+    return {
+        "type": "line",
+        "name": _CNV_REFERENCE_SERIES_NAME,
+        "yAxisIndex": 0,
+        "data": [],
+        "silent": True,
+        "animation": False,
+        "z": 2,
+        "zlevel": 1,
+        "tooltip": {"show": False},
+        "markLine": {
+            "symbol": "none",
+            "animation": False,
+            "silent": True,
+            "data": mark_data,
+        },
+    }
+
+
+@lru_cache(maxsize=1)
+def _cnv_centromere_boundaries() -> Dict[str, int]:
+    """p/q boundary per chromosome, empty when the resource is unavailable."""
+    try:
+        from robin.analysis.cnv_regional import load_centromere_boundaries
+
+        return dict(load_centromere_boundaries())
+    except Exception:
+        logging.debug("Could not load centromere boundaries", exc_info=True)
+        return {}
+
+
+def _cnv_centromere_line_series(
+    *,
+    dark: bool,
+    selected: str,
+    chrom_offsets: Dict[str, float],
+) -> Optional[Dict[str, Any]]:
+    """Faint dashed verticals separating the p and q arm of each chromosome."""
+    boundaries = _cnv_centromere_boundaries()
+    if not boundaries:
+        return None
+
+    color = _CNV_CENTROMERE_COLOR_DARK if dark else _CNV_CENTROMERE_COLOR_LIGHT
+    style = {"color": color, "type": "dashed", "width": 1, "opacity": 1.0}
+    mark_data = []
+    if selected == "All":
+        for contig, offset in chrom_offsets.items():
+            boundary = boundaries.get(contig)
+            if boundary is None:
+                continue
+            mark_data.append(
+                {"xAxis": float(offset) + float(boundary), "lineStyle": style,
+                 "label": {"show": False}}
+            )
+    else:
+        boundary = boundaries.get(selected)
+        if boundary is not None:
+            mark_data.append(
+                {"xAxis": float(boundary), "lineStyle": style, "label": {"show": False}}
+            )
+    if not mark_data:
+        return None
+
+    return {
+        "type": "line",
+        "name": _CNV_CENTROMERE_SERIES_NAME,
+        "yAxisIndex": 0,
+        "data": [],
+        "silent": True,
+        "animation": False,
+        # Behind the bins, the segment line and the reference guides.
+        "z": 1,
+        "zlevel": 0,
+        "tooltip": {"show": False},
+        "markLine": {
+            "symbol": "none",
+            "animation": False,
+            "silent": True,
+            "data": mark_data,
+        },
+    }
+
+
+def _upsert_cnv_centromere_lines(
+    chart: Any,
+    *,
+    dark: bool,
+    selected: str,
+    chrom_offsets: Dict[str, float],
+) -> None:
+    """Insert (or refresh) the p/q arm dividers on a CNV chart."""
+    series = chart.options.get("series")
+    if not isinstance(series, list):
         return
-    axis = y_axes[1]
-    if not isinstance(axis, dict):
+    chart.options["series"] = [
+        s for s in series if s.get("name") != _CNV_CENTROMERE_SERIES_NAME
+    ]
+    centromeres = _cnv_centromere_line_series(
+        dark=dark, selected=selected, chrom_offsets=chrom_offsets
+    )
+    if centromeres is not None:
+        chart.options["series"].insert(0, centromeres)
+
+
+def _upsert_cnv_reference_lines(
+    chart: Any,
+    *,
+    use_log: bool,
+    dark: bool,
+    chromosome: str,
+    sex_estimate: str,
+    y_lo: float,
+    y_hi: float,
+    cutoff_override: Optional[float] = None,
+) -> None:
+    """Insert (or refresh) the reference-line series on a CNV chart."""
+    series = chart.options.get("series")
+    if not isinstance(series, list):
         return
-    axis["show"] = bool(show)
-    axis.pop("max", None)
-    grid = chart.options.get("grid")
-    if isinstance(grid, dict):
-        grid["right"] = "8%" if show else "5%"
+    chart.options["series"] = [
+        s for s in series if s.get("name") != _CNV_REFERENCE_SERIES_NAME
+    ]
+    reference = _cnv_reference_line_series(
+        use_log=use_log,
+        dark=dark,
+        chromosome=chromosome,
+        sex_estimate=sex_estimate,
+        y_lo=y_lo,
+        y_hi=y_hi,
+        cutoff_override=cutoff_override,
+    )
+    if reference is not None:
+        chart.options["series"].insert(0, reference)
 
 
 def _cnv_plot_bin_key_from_ui(value: Any) -> str:
@@ -1360,6 +1947,29 @@ def _cnv_echart_palette(dark: bool) -> Dict[str, str]:
     }
 
 
+def _apply_cnv_scatter_performance(echart: Any) -> None:
+    """Switch dense CNV scatter series onto ECharts' batched rendering path.
+
+    Without this the higher point cap needed for a readable genome-wide profile
+    would cost noticeable frame time on every live refresh.
+    """
+    try:
+        series = echart.options.get("series")
+        if not isinstance(series, list):
+            return
+        for s in series:
+            if not isinstance(s, dict) or s.get("type") != "scatter":
+                continue
+            if s.get("name") in _CNV_OVERLAY_SERIES_NAMES:
+                continue
+            s["large"] = True
+            s["largeThreshold"] = _CNV_LARGE_SCATTER_THRESHOLD
+            s["progressive"] = _CNV_PROGRESSIVE_CHUNK
+            s["progressiveThreshold"] = _CNV_LARGE_SCATTER_THRESHOLD
+    except Exception:
+        pass
+
+
 def _apply_cnv_echart_chrome(echart: Any, dark: bool) -> None:
     """Apply light/dark readable chrome without touching series data."""
     p = _cnv_echart_palette(dark)
@@ -1508,6 +2118,34 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         cnv_var = ui.label("Variance: --").classes(
                             "classification-insight-meta"
                         )
+            with ui.card().classes(
+                "classification-insight-card w-full min-w-0 mt-2"
+            ):
+                with ui.column().classes("w-full min-w-0 gap-2 p-2 md:p-3"):
+                    with ui.row().classes("items-center gap-2 min-w-0"):
+                        ui.icon("donut_large").classes("classification-insight-icon")
+                        ui.label("CNV load").classes(
+                            "classification-insight-model flex-1 min-w-0"
+                        )
+                    cnv_load_total = ui.label("Total: --").classes(
+                        "classification-insight-result w-full"
+                    )
+                    with ui.row().classes(
+                        "w-full gap-4 flex-wrap items-baseline"
+                    ):
+                        cnv_load_gain = ui.label("Gain: --").classes(
+                            "classification-insight-meta"
+                        )
+                        cnv_load_loss = ui.label("Loss: --").classes(
+                            "classification-insight-meta"
+                        )
+                        cnv_load_assessed = ui.label("Assessed: --").classes(
+                            "classification-insight-meta"
+                        )
+                    ui.label(
+                        "Proportion of the assessed genome past the calling "
+                        "cut-off — the same threshold drawn on the plots."
+                    ).classes("classification-insight-foot w-full")
             with ui.row().classes(
                 "w-full gap-3 items-center mb-2 flex-wrap mt-2"
             ):
@@ -1524,7 +2162,19 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     resolve_cnv_gui_color_mode,
                     resolve_cnv_gui_gene_coverage_filter,
                     resolve_cnv_gui_show_breakpoints,
+                    resolve_cnv_gui_chrom_axis,
+                    resolve_cnv_gui_genome_axis,
+                    resolve_cnv_gui_cutoff,
+                    resolve_cnv_gui_gene_label_size,
+                    resolve_cnv_gui_label_orientation,
+                    resolve_cnv_gui_show_trend_line,
                     resolve_cnv_gui_y_scale,
+                )
+                from robin.gui.plotting_preferences import (
+                    cnv_chrom_axis_options,
+                    cnv_genome_axis_options,
+                    cnv_cutoff_options,
+                    cnv_gene_label_size_options,
                 )
 
                 _plot_prefs = getattr(launcher, "plotting_preferences", None)
@@ -1541,6 +2191,28 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 if "show_bp" not in _cnv_ui_state:
                     _cnv_ui_state["show_bp"] = resolve_cnv_gui_show_breakpoints(
                         _plot_prefs
+                    )
+                if "show_trend" not in _cnv_ui_state:
+                    _cnv_ui_state["show_trend"] = resolve_cnv_gui_show_trend_line(
+                        _plot_prefs
+                    )
+                if "cutoff" not in _cnv_ui_state:
+                    _cnv_ui_state["cutoff"] = resolve_cnv_gui_cutoff(_plot_prefs)
+                if "chrom_axis" not in _cnv_ui_state:
+                    _cnv_ui_state["chrom_axis"] = resolve_cnv_gui_chrom_axis(
+                        _plot_prefs
+                    )
+                if "genome_axis" not in _cnv_ui_state:
+                    _cnv_ui_state["genome_axis"] = resolve_cnv_gui_genome_axis(
+                        _plot_prefs
+                    )
+                if "gene_label_size" not in _cnv_ui_state:
+                    _cnv_ui_state["gene_label_size"] = (
+                        resolve_cnv_gui_gene_label_size(_plot_prefs)
+                    )
+                if "label_orientation" not in _cnv_ui_state:
+                    _cnv_ui_state["label_orientation"] = (
+                        resolve_cnv_gui_label_orientation(_plot_prefs)
                     )
 
                 ui.label("Coverage genes").classes("classification-insight-meta ml-2")
@@ -1597,6 +2269,100 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     )
                     cnv_scale.value = _y_scale == "log"
                     ui.label("Log2").classes("classification-insight-meta")
+                ui.label("Cut-off").classes("classification-insight-meta ml-2")
+                _cutoff_options = cnv_cutoff_options()
+                _cutoff_value = str(_cnv_ui_state.get("cutoff") or "calling")
+                if _cutoff_value not in _cutoff_options:
+                    _cutoff_value = "calling"
+                _cnv_ui_state["cutoff"] = _cutoff_value
+                cnv_cutoff = (
+                    ui.select(options=_cutoff_options, value=_cutoff_value)
+                    .style("width: 150px")
+                    .tooltip(
+                        "Gain/loss cut-off used everywhere for this sample: the "
+                        "plot lines and colouring, the Outliers filter, the "
+                        "events, regional and NGTD tables, the gene states, CNV "
+                        "load, and any report or plot exported from here."
+                    )
+                )
+                ui.label("Gene label").classes("classification-insight-meta ml-2")
+                _label_options = cnv_gene_label_size_options()
+                _label_value = str(_cnv_ui_state.get("gene_label_size") or "4.5")
+                if _label_value not in _label_options:
+                    _label_value = "4.5"
+                _cnv_ui_state["gene_label_size"] = _label_value
+                cnv_gene_label = (
+                    ui.select(options=_label_options, value=_label_value)
+                    .style("width: 165px")
+                    .tooltip(
+                        "Size of the gene name labels on the plots and in "
+                        "downloaded PDFs. Point sizes are as rendered in the report."
+                    )
+                )
+                ui.label("Label style").classes("classification-insight-meta ml-2")
+                _orientation = str(
+                    _cnv_ui_state.get("label_orientation") or "rotated"
+                )
+                _cnv_ui_state["label_orientation"] = _orientation
+                with ui.row().classes("items-center gap-1"):
+                    ui.label("Horizontal").classes("classification-insight-meta")
+                    cnv_label_orient = (
+                        ui.switch(value=_orientation == "rotated")
+                        .props("dense")
+                        .tooltip(
+                            "Left: gene names read horizontally · "
+                            "Right: rotated alongside the marker (array style)"
+                        )
+                    )
+                    cnv_label_orient.value = _orientation == "rotated"
+                    ui.label("Portrait").classes("classification-insight-meta")
+                ui.label("Chr Y-range").classes("classification-insight-meta ml-2")
+                _axis_options = cnv_chrom_axis_options()
+                _axis_value = str(_cnv_ui_state.get("chrom_axis") or "2")
+                if _axis_value not in _axis_options:
+                    _axis_value = "2"
+                _cnv_ui_state["chrom_axis"] = _axis_value
+                cnv_chrom_axis = (
+                    ui.select(options=_axis_options, value=_axis_value)
+                    .style("width: 150px")
+                    .tooltip(
+                        "Fixed Y range for single-chromosome views and the "
+                        "per-chromosome plots, so chromosomes can be compared. "
+                        "Bins outside it are flagged at the panel edge."
+                    )
+                )
+                ui.label("Genome Y-range").classes(
+                    "classification-insight-meta ml-2"
+                )
+                _genome_axis_options = cnv_genome_axis_options()
+                _genome_axis_value = str(_cnv_ui_state.get("genome_axis") or "auto")
+                if _genome_axis_value not in _genome_axis_options:
+                    _genome_axis_value = "auto"
+                _cnv_ui_state["genome_axis"] = _genome_axis_value
+                cnv_genome_axis = (
+                    ui.select(
+                        options=_genome_axis_options, value=_genome_axis_value
+                    )
+                    .style("width: 150px")
+                    .tooltip(
+                        "Fixed Y range for the genome-wide view and its PDF. "
+                        "Auto fits the axis to the data, which is the default: "
+                        "unlike the per-chromosome plots there is nothing to "
+                        "compare it against."
+                    )
+                )
+                ui.label("Segment line").classes("classification-insight-meta ml-2")
+                with ui.row().classes("items-center gap-1"):
+                    ui.label("Hide").classes("classification-insight-meta")
+                    cnv_trend = (
+                        ui.switch(value=bool(_cnv_ui_state.get("show_trend", True)))
+                        .props("dense")
+                        .tooltip(
+                            "Piecewise-constant segment line over the CNV bins"
+                        )
+                    )
+                    cnv_trend.value = bool(_cnv_ui_state.get("show_trend", True))
+                    ui.label("Show").classes("classification-insight-meta")
                 ui.label("Plot bin").classes("classification-insight-meta ml-2")
                 cnv_plot_bin = ui.select(
                     options=_CNV_PLOT_BIN_OPTIONS,
@@ -1618,6 +2384,22 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     )
                     cnv_bp.value = bool(_cnv_ui_state.get("show_bp", True))
                     ui.label("Show").classes("classification-insight-meta")
+                with ui.row().classes("items-center gap-2 ml-auto"):
+                    cnv_pdf_genome_btn = (
+                        ui.button("Genome PDF", icon="download")
+                        .props("dense outline no-caps size=sm")
+                        .tooltip(
+                            "Download the genome-wide CNV plot as a vector PDF"
+                        )
+                    )
+                    cnv_pdf_chrom_btn = (
+                        ui.button("Chromosome PDFs", icon="download")
+                        .props("dense outline no-caps size=sm")
+                        .tooltip(
+                            "Download every per-chromosome CNV plot as one "
+                            "multi-page vector PDF"
+                        )
+                    )
             with ui.element("div").classes("w-full target-coverage-panel__plot-wrap"):
                 cnv_abs = ui.echart(
                     {
@@ -1677,7 +2459,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             },
                         ],
                     }
-                ).classes("w-full h-[22.5rem] cnv-genome-abs-chart")
+                ).classes("w-full h-[32rem] cnv-genome-abs-chart")
             with ui.element("div").classes("w-full target-coverage-panel__plot-wrap mt-2"):
                 cnv_diff = ui.echart(
                     {
@@ -1742,7 +2524,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                             },
                         ],
                     }
-                ).classes("w-full h-[22.5rem] cnv-genome-diff-chart")
+                ).classes("w-full h-[26rem] cnv-genome-diff-chart")
             genome_charts = (cnv_abs, cnv_diff)
 
             ui.separator().classes("mgmt-detail-separator")
@@ -1801,7 +2583,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 pass
 
             ui.separator().classes("mgmt-detail-separator")
-            ui.label("Arm / whole-chromosome CNV events").classes(
+            cnv_events_label = ui.label("Arm / whole-chromosome CNV events").classes(
                 "target-coverage-panel__meta-label mt-2 mb-1"
             )
             cnv_events_summary = ui.label("No CNV events detected").classes(
@@ -1829,8 +2611,48 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         except Exception:
             pass
 
-    # Adaptive thinning helpers
-    MAX_POINTS_PER_CHART = 10000
+        ui.separator().classes("mgmt-detail-separator")
+        ngtd_label = ui.label("NGTD and clinical trial targets CNVs").classes(
+            "target-coverage-panel__meta-label mt-2 mb-1"
+        )
+        ngtd_summary = ui.label("Awaiting CNV data").classes(
+            "classification-insight-meta mb-2"
+        )
+        ngtd_columns = [
+            {"name": "gene", "label": "Gene", "field": "gene", "sortable": True},
+            {"name": "chrom", "label": "Chr", "field": "chrom", "sortable": True},
+            {
+                "name": "value",
+                "label": "Log2 ratio",
+                "field": "value",
+                "sortable": True,
+                "align": "right",
+            },
+            {
+                "name": "state",
+                "label": "Result",
+                "field": "state",
+                "sortable": True,
+                "align": "center",
+            },
+        ]
+        _, ngtd_table = styled_table(
+            columns=ngtd_columns, rows=[], pagination=20, class_size="table-xs"
+        )
+        try:
+            ngtd_table.props('multi-sort rows-per-page-options="[10,20,50,0]"')
+        except Exception:
+            pass
+        ui.label(
+            "Every configured target is listed. \u201cNo CNVs Detected\u201d means the gene was "
+            "assessed and nothing crossed the cut-off; \u201cNot on panel\u201d and "
+            "\u201cNo data yet\u201d mean it was not assessed, which is not the same thing."
+        ).classes("classification-insight-foot mb-2")
+
+    # Adaptive thinning helpers. The cap is what limits how much of the CNV track
+    # actually reaches the genome-wide panel, so it is set well above the number of
+    # analysis bins in a human genome and ECharts' fast scatter path carries it.
+    MAX_POINTS_PER_CHART = 40000
 
     def _get_visible_range(chart, series_list):
         try:
@@ -1912,11 +2734,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             data_series = []
             for idx, s in enumerate(series):
                 name = s.get("name", "")
-                if s.get("type") == "scatter" and name not in (
-                    "centromeres_highlight",
-                    "cytobands_highlight",
-                    _CONFIGURED_GENES_SERIES_NAME,
-                    _CONFIGURED_GENES_LABELS_SERIES_NAME,
+                if (
+                    s.get("type") == "scatter"
+                    and name not in _CNV_OVERLAY_SERIES_NAMES
                 ):
                     data = s.get("data") or []
                     if isinstance(data, list) and data:
@@ -2043,6 +2863,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         chromosome: str,
         bin_width: int,
         sex_estimate: str,
+        cutoff_override: Optional[float] = None,
     ) -> pd.DataFrame:
         """Run shared regional cytoband analysis (same logic as PDF reports)."""
         try:
@@ -2054,6 +2875,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 _load_centromere_bed_df(),
                 _EMPTY_GENE_BED,
                 sex_estimate,
+                cutoff_override=cutoff_override,
             )
         except Exception:
             return pd.DataFrame()
@@ -2136,9 +2958,12 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         chromosome: str,
         bin_width: int,
         sex_estimate: str,
+        cutoff_override: Optional[float] = None,
     ) -> str:
         try:
-            df = _analyze_cytoband_cnv(cnv_data, chromosome, bin_width, sex_estimate)
+            df = _analyze_cytoband_cnv(
+                cnv_data, chromosome, bin_width, sex_estimate, cutoff_override
+            )
             if df.empty:
                 return "No regional CNV events detected"
             significant = df[df["cnv_state"].isin(SIGNIFICANT_CNV_STATES)]
@@ -2166,14 +2991,19 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             return "No CNV data available"
 
     def _compute_all_cytoband_df(
-        cnv_data: Dict[str, np.ndarray], bin_width: int, sex_estimate: str
+        cnv_data: Dict[str, np.ndarray],
+        bin_width: int,
+        sex_estimate: str,
+        cutoff_override: Optional[float] = None,
     ) -> pd.DataFrame:
         try:
             frames: List[pd.DataFrame] = []
             for chrom in natsort.natsorted(cnv_data.keys()):
                 if not is_reportable_chromosome(chrom):
                     continue
-                df = _analyze_cytoband_cnv(cnv_data, chrom, bin_width, sex_estimate)
+                df = _analyze_cytoband_cnv(
+                    cnv_data, chrom, bin_width, sex_estimate, cutoff_override
+                )
                 if not df.empty:
                     frames.append(df)
             if frames:
@@ -2240,9 +3070,15 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     bin_width=int(calling_binw),
                     sex_estimate=sex_lbl,
                     cytobands_df=cyto_df,
-                    gene_df=gene_df
+                    gene_df=gene_df,
+                    cutoff_override=_resolve_cnv_cutoff(state.get("cutoff")),
                 )
-                
+                _set_cutoff_heading(
+                    cnv_events_label,
+                    "Arm / whole-chromosome CNV events",
+                    _resolve_cnv_cutoff(state.get("cutoff")),
+                )
+
                 # Update events table
                 events_rows = []
                 for event in events:
@@ -2274,9 +3110,108 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             cnv_arm_summary.set_text("Arm-level: --")
             cnv_events_summary.set_text("Error analyzing CNV events")
 
+    def _refresh_ngtd_table(state: Dict[str, Any]) -> None:
+        """Fill the NGTD target table from the current log2 track."""
+        try:
+            from robin.analysis.cnv_regional import (
+                compute_target_gene_cnv_states,
+                load_gene_bed,
+                load_panel_gene_bed,
+            )
+            from robin.workflow_config import get_cnv_ngtd_genes
+
+            genes = tuple(get_cnv_ngtd_genes())
+            track = state.get("cnv_log2") or {}
+            bin_width = int((state.get("cnv_dict") or {}).get("bin_width") or 0)
+            if not genes or not track or bin_width <= 0:
+                ngtd_table.rows = []
+                ngtd_summary.set_text("Awaiting CNV data")
+                return
+            _panel_name, panel_df = load_panel_gene_bed(str(sample_dir))
+            frames = [f for f in (panel_df, load_gene_bed()) if f is not None and not f.empty]
+            rows = compute_target_gene_cnv_states(
+                track,
+                bin_width,
+                genes,
+                _cnv_sex_estimate_label(state.get("xy")),
+                gene_frames=frames or None,
+                cutoff_override=_resolve_cnv_cutoff(state.get("cutoff")),
+            )
+        except Exception:
+            logging.debug("Could not build the NGTD target table", exc_info=True)
+            return
+        ngtd_table.rows = [
+            {
+                "gene": row["gene"],
+                "chrom": row["chrom"] or "--",
+                "value": f"{row['value']:+.2f}" if row["value"] is not None else "--",
+                "state": row["state"],
+            }
+            for row in rows
+        ]
+        called = sum(1 for row in rows if row["state"] in ("GAIN", "LOSS"))
+        _set_cutoff_heading(
+            ngtd_label,
+            "NGTD and clinical trial targets CNVs",
+            _resolve_cnv_cutoff(state.get("cutoff")),
+        )
+        ngtd_summary.set_text(
+            f"{len(rows)} targets checked; {called} with a called gain or loss"
+        )
+        try:
+            ngtd_table.update()
+        except Exception:
+            pass
+
+    def _refresh_cnv_load_labels(state: Dict[str, Any]) -> None:
+        """Update the CNV load card from the current log2 track."""
+        try:
+            from robin.analysis.cnv_regional import compute_cnv_load
+
+            track = state.get("cnv_log2") or {}
+            bin_width = int((state.get("cnv_dict") or {}).get("bin_width") or 0)
+            load = (
+                compute_cnv_load(
+                    track,
+                    bin_width,
+                    _cnv_sex_estimate_label(state.get("xy")),
+                    cutoff_override=_resolve_cnv_cutoff(state.get("cutoff")),
+                )
+                if track and bin_width > 0
+                else None
+            )
+        except Exception:
+            logging.debug(
+                "Could not compute CNV load for the GUI", exc_info=True
+            )
+            load = None
+        if not load or not load.get("assessed_mb"):
+            cnv_load_total.set_text("Total: --")
+            cnv_load_gain.set_text("Gain: --")
+            cnv_load_loss.set_text("Loss: --")
+            cnv_load_assessed.set_text("Assessed: --")
+            return
+        label = load.get("cutoff_label")
+        cnv_load_total.set_text(
+            f"Total: {load['total_percent']:.1f}% "
+            f"({load['total_mb']:,.0f} Mb)"
+            + (f"  \u00b7  cut-off {label}" if label else "")
+        )
+        cnv_load_gain.set_text(
+            f"Gain: {load['gain_percent']:.1f}% ({load['gain_mb']:,.0f} Mb)"
+        )
+        cnv_load_loss.set_text(
+            f"Loss: {load['loss_percent']:.1f}% ({load['loss_mb']:,.0f} Mb)"
+        )
+        cnv_load_assessed.set_text(
+            f"Assessed: {load['assessed_mb']:,.0f} Mb"
+        )
+
     def _render_cnv_from_state(state: Dict[str, Any]) -> None:
         try:
             _recompute_cnv_log2_state(state)
+            _refresh_cnv_load_labels(state)
+            _refresh_ngtd_table(state)
             cnv_map = state.get("cnv")
             cnv3_map = state.get("cnv3")
             cnv_log2_map = _unwrap_cnv_track_map(state.get("cnv_log2"))
@@ -2345,10 +3280,6 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             else:
                 color_mode = "chromosome"
 
-            # Diff chart never uses the right axis; abs coverage axis is set with lollipops.
-            if len(cnv_diff.options.get("yAxis") or []) > 1:
-                cnv_diff.options["yAxis"][1]["show"] = False
-
             cnv_abs.options["yAxis"][0]["type"] = "value"
             cnv_abs.options["yAxis"][0].pop("logBase", None)
             # Clear any previous pinned Y window; marker overlay re-applies auto-scale.
@@ -2374,6 +3305,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     cnv_abs,
                     -2.0 if use_log else 0.0,
                     2.0 if use_log else 6.0,
+                    use_log=use_log,
                 )
             except Exception:
                 pass
@@ -2404,6 +3336,23 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 )
                 coverage_by_gene = {}
 
+            # Robust value envelope of the plotted bins, filled in once the scatter
+            # series exist; drives the y-window so labels get their own gutters.
+            abs_data_range: Dict[str, Optional[Tuple[float, float]]] = {"range": None}
+            sex_estimate_label = _cnv_sex_estimate_label(state.get("xy"))
+            show_trend = bool(state.get("show_trend", True))
+            cutoff_override = _resolve_cnv_cutoff(state.get("cutoff"))
+            gene_label_px = _resolve_cnv_gene_label_px(state.get("gene_label_size"))
+            labels_rotated = _resolve_cnv_labels_rotated(state.get("label_orientation"))
+            # The two views have separate Y-range settings: a fixed window lets
+            # chromosomes be compared with each other, while the genome-wide view
+            # has nothing to compare against and so defaults to fitting the data.
+            fixed_axis_log2 = (
+                _resolve_cnv_chrom_axis(state.get("chrom_axis"))
+                if selected != "All"
+                else _resolve_cnv_chrom_axis(state.get("genome_axis"))
+            )
+
             def _apply_abs_gene_coverage_overlay() -> None:
                 """Coverage lollipops on the abs chart only (position markers if no coverage)."""
                 filter_mode = str(
@@ -2427,24 +3376,40 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     filter_mode=filter_mode,
                     use_log=use_log,
                     scale_mean_cnv=float(sample_rel_mean),
+                    sex_estimate=sex_estimate_label,
+                    cutoff_override=cutoff_override,
                 )
-                _set_cnv_abs_coverage_axis(cnv_abs, show=False)
-                if points:
-                    _upsert_configured_gene_coverage_lollipops(
-                        cnv_abs,
-                        points,
-                        use_log=use_log,
-                        dark=dark_ui,
-                        scale_mean_cnv=float(sample_rel_mean),
-                    )
-                    return
                 _upsert_configured_gene_coverage_lollipops(
                     cnv_abs,
-                    (),
+                    points,
                     use_log=use_log,
                     dark=dark_ui,
                     scale_mean_cnv=float(sample_rel_mean),
+                    data_range=abs_data_range["range"],
+                    fixed_axis_log2=fixed_axis_log2,
+                    label_size_px=gene_label_px,
+                    labels_rotated=labels_rotated,
+                    x_span=float(x_axis_max) if x_axis_max else None,
                 )
+                _upsert_cnv_centromere_lines(
+                    cnv_abs,
+                    dark=dark_ui,
+                    selected=selected,
+                    chrom_offsets=chrom_offsets,
+                )
+                y_axis = (cnv_abs.options.get("yAxis") or [{}])[0]
+                _upsert_cnv_reference_lines(
+                    cnv_abs,
+                    use_log=use_log,
+                    dark=dark_ui,
+                    chromosome=selected,
+                    sex_estimate=sex_estimate_label,
+                    y_lo=float(y_axis.get("min", 0.0)),
+                    y_hi=float(y_axis.get("max", 1.0)),
+                    cutoff_override=cutoff_override,
+                )
+                if points:
+                    return
                 # Fall back to position markers when target coverage is unavailable.
                 if configured_gene_locations and not coverage_by_gene:
                     _upsert_configured_gene_series(
@@ -2457,6 +3422,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
 
             # Absolute plot
             series_abs = []
+            trend_series_abs: List[Dict[str, Any]] = []
             # Prepare chromosome partitions for labels/areas when viewing All
             chrom_bounds = []  # list of (name, start_bp, end_bp)
             chrom_offsets: Dict[str, float] = {}
@@ -2479,6 +3445,15 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         ]
                     else:
                         pts = list(zip(x_global.tolist(), [float(v) for v in vals]))
+                    if show_trend:
+                        trend = _cnv_trend_series(
+                            contig,
+                            x_global.tolist(),
+                            vals.tolist(),
+                            dark=dark_ui,
+                        )
+                        if trend is not None:
+                            trend_series_abs.append(trend)
                     start_bp = offset_bp
                     end_bp = offset_bp + len(cnv) * binw_analysis
                     chrom_offsets[contig] = start_bp
@@ -2553,6 +3528,15 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         ]
                     else:
                         pts = list(zip(x_local.tolist(), [float(v) for v in vals]))
+                    if show_trend:
+                        trend = _cnv_trend_series(
+                            selected,
+                            x_local.tolist(),
+                            vals.tolist(),
+                            dark=dark_ui,
+                        )
+                        if trend is not None:
+                            trend_series_abs.append(trend)
                     if color_mode == "chromosome":
                         series_abs.append(
                             {
@@ -2599,28 +3583,18 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                     "data": norm,
                                 }
                             )
+            # Robust envelope from the un-thinned bins, before overlays are added.
+            abs_data_range["range"] = _cnv_scatter_value_range(series_abs)
             # Preserve highlight series (centromeres, cytobands) and replace data series only
             keep = [
                 s
                 for s in cnv_abs.options["series"]
                 if s.get("name") in ("centromeres_highlight", "cytobands_highlight")
             ]
-            cnv_abs.options["series"] = series_abs + keep
+            cnv_abs.options["series"] = series_abs + trend_series_abs + keep
+            # Baseline / threshold guides are added by the overlay pass below so they
+            # survive the later series rebuilds.
             _apply_abs_gene_coverage_overlay()
-            if use_log and series_abs:
-                series_abs[0]["markLine"] = {
-                    "symbol": "none",
-                    "data": [
-                        {
-                            "yAxis": 0,
-                            "lineStyle": {
-                                "type": "dashed",
-                                "color": "#888888",
-                                "width": 1,
-                            },
-                        }
-                    ],
-                }
             # Build background chromosome areas and vertical labels when showing All
             try:
                 if selected == "All" and chrom_bounds:
@@ -2789,6 +3763,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                                             sex_estimate=sex_lbl,
                                             cytobands_df=cyto_df,
                                             gene_df=gene_df,
+                                            cutoff_override=_resolve_cnv_cutoff(
+                                                state.get("cutoff")
+                                            ),
                                         )
                                 except Exception:
                                     pass
@@ -3029,6 +4006,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             # Ensure abs coverage lollipops remain on top after thinning / overlay mutations.
             _apply_abs_gene_coverage_overlay()
 
+            _apply_cnv_scatter_performance(cnv_abs)
             _apply_cnv_echart_chrome(cnv_abs, _is_dark_mode())
             _cnv_echart_push_update(cnv_abs)
             # Difference plot (linear CNV3)
@@ -3050,7 +4028,54 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     ]
                 except Exception:
                     keep = []
-                cnv_diff.options["series"] = series_diff + keep
+                trend_series_diff: List[Dict[str, Any]] = []
+                if show_trend:
+                    for series in series_diff:
+                        data = series.get("data") or []
+                        if not data:
+                            continue
+                        trend = _cnv_trend_series(
+                            str(series.get("name") or "diff"),
+                            [float(p[0]) for p in data],
+                            [float(p[1]) for p in data],
+                            dark=dark_ui,
+                        )
+                        if trend is not None:
+                            trend_series_diff.append(trend)
+                cnv_diff.options["series"] = series_diff + trend_series_diff + keep
+                # The difference track is centred on zero, so give it the same
+                # symmetric, mirrored, finely ticked axis as the log2 CNV panel.
+                diff_lo, diff_hi = _cnv_diff_y_window(
+                    _cnv_scatter_value_range(series_diff)
+                )
+                diff_ticks = cnv_axis_tick_spec(diff_lo, diff_hi, use_log=True)
+                diff_lo, diff_hi = snap_axis_window_to_ticks(
+                    diff_lo, diff_hi, diff_ticks.major
+                )
+                diff_ticks = cnv_axis_tick_spec(diff_lo, diff_hi, use_log=True)
+                _apply_cnv_abs_y_window(
+                    cnv_diff,
+                    diff_lo,
+                    diff_hi,
+                    ticks=diff_ticks,
+                    use_log=True,
+                )
+                _upsert_cnv_centromere_lines(
+                    cnv_diff,
+                    dark=dark_ui,
+                    selected=selected,
+                    chrom_offsets=chrom_offsets,
+                )
+                _upsert_cnv_reference_lines(
+                    cnv_diff,
+                    use_log=True,
+                    dark=dark_ui,
+                    chromosome=selected,
+                    sex_estimate=sex_estimate_label,
+                    y_lo=diff_lo,
+                    y_hi=diff_hi,
+                    cutoff_override=cutoff_override,
+                )
                 _upsert_configured_gene_series(
                     cnv_diff,
                     configured_gene_locations,
@@ -3066,9 +4091,11 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     chrom_offsets=chrom_offsets,
                     dark=dark_ui,
                 )
+                _apply_cnv_scatter_performance(cnv_diff)
                 _apply_cnv_echart_chrome(cnv_diff, _is_dark_mode())
                 _cnv_echart_push_update(cnv_diff)
             else:
+                _apply_cnv_scatter_performance(cnv_diff)
                 _apply_cnv_echart_chrome(cnv_diff, _is_dark_mode())
                 _cnv_echart_push_update(cnv_diff)
 
@@ -3132,19 +4159,28 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 selected = state.get("selected_chrom", "All")
                 binw = state.get("cnv_dict", {}).get("bin_width", 1_000_000)
                 sex_lbl = _sex_label(state.get("xy"))
-                if isinstance(cnv3_map, dict):
-                    data = cnv3_map
-                    source = "cnv3"
+                # log2(ploidy / expected) — the same track every other CNV
+                # output uses. The sample-minus-reference track this replaces
+                # has the signal largely subtracted out, because the reference
+                # pass re-processes the same BAM on top of the reference
+                # baseline and so inherits the sample's own aberration.
+                if isinstance(cnv_log2_map, dict) and cnv_log2_map:
+                    data = cnv_log2_map
+                    source = "cnv_log2"
                 else:
                     data = cnv_map if isinstance(cnv_map, dict) else None
                     source = "cnv"
                 if data and binw:
+                    cyto_cutoff = _resolve_cnv_cutoff(state.get("cutoff"))
                     cache_key = (
                         f"{source}:{state.get(source+'_m')}:{int(binw)}:{sex_lbl}"
+                        f":{cyto_cutoff}"
                     )
                     if state.get("cyto_cache_key") != cache_key:
                         panel_name, panel_genes_df = load_panel_gene_bed(str(sample_dir))
-                        df_all = _compute_all_cytoband_df(data, int(binw), sex_lbl)
+                        df_all = _compute_all_cytoband_df(
+                            data, int(binw), sex_lbl, cyto_cutoff
+                        )
                         state["cyto_df_all"] = df_all
                         state["panel_name"] = panel_name
                         state["panel_genes_df"] = panel_genes_df
@@ -3157,7 +4193,9 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                     regional_title = "Regional CNV events"
                     if panel_name:
                         regional_title += f" ({panel_name} panel genes)"
-                    regional_cnv_label.set_text(regional_title)
+                    regional_cnv_label.set_text(
+                        regional_title + _cutoff_suffix_text(cyto_cutoff)
+                    )
 
                     if isinstance(df_all, pd.DataFrame) and not df_all.empty:
                         if selected and selected != "All":
@@ -3176,7 +4214,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                         if selected and selected != "All":
                             regional_cnv_summary.set_text(
                                 _get_cytoband_cnv_summary(
-                                    data, selected, int(binw), sex_lbl
+                                    data, selected, int(binw), sex_lbl, cyto_cutoff
                                 )
                             )
                         elif regional_rows:
@@ -3571,6 +4609,8 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             state["cnv3"] = payload["cnv3"]
             state["cnv3_m"] = cnv3_npy_mtime
         _recompute_cnv_log2_state(state)
+        _refresh_cnv_load_labels(state)
+        _refresh_ngtd_table(state)
 
         if state.get("cnv"):
             if changed:
@@ -3842,6 +4882,87 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 pass
             _force_redraw_with_marker_autoscale()
 
+        def _on_cutoff(ev):
+            st = launcher._cnv_state.setdefault(str(sample_dir), {})
+            value = _val(ev, "calling")
+            if isinstance(value, dict):
+                value = value.get("value", value.get("label"))
+            st["cutoff"] = str(value or "calling")
+            try:
+                if getattr(cnv_cutoff, "value", None):
+                    st["cutoff"] = str(cnv_cutoff.value)
+            except Exception:
+                pass
+            st["_force_chrom_refresh"] = True
+            _force_redraw_with_marker_autoscale()
+
+        def _on_label_orient(ev):
+            st = launcher._cnv_state.setdefault(str(sample_dir), {})
+            st["label_orientation"] = (
+                "rotated" if _switch_bool(ev, default=True) else "horizontal"
+            )
+            try:
+                if isinstance(getattr(cnv_label_orient, "value", None), bool):
+                    st["label_orientation"] = (
+                        "rotated" if cnv_label_orient.value else "horizontal"
+                    )
+            except Exception:
+                pass
+            st["_force_chrom_refresh"] = True
+            _force_redraw_with_marker_autoscale()
+
+        def _on_gene_label(ev):
+            st = launcher._cnv_state.setdefault(str(sample_dir), {})
+            value = _val(ev, "4.5")
+            if isinstance(value, dict):
+                value = value.get("value", value.get("label"))
+            st["gene_label_size"] = str(value or "4.5")
+            try:
+                if getattr(cnv_gene_label, "value", None):
+                    st["gene_label_size"] = str(cnv_gene_label.value)
+            except Exception:
+                pass
+            st["_force_chrom_refresh"] = True
+            _force_redraw_with_marker_autoscale()
+
+        def _on_chrom_axis(ev):
+            st = launcher._cnv_state.setdefault(str(sample_dir), {})
+            value = _val(ev, "2")
+            if isinstance(value, dict):
+                value = value.get("value", value.get("label"))
+            st["chrom_axis"] = str(value or "2")
+            try:
+                if getattr(cnv_chrom_axis, "value", None):
+                    st["chrom_axis"] = str(cnv_chrom_axis.value)
+            except Exception:
+                pass
+            st["_force_chrom_refresh"] = True
+            _force_redraw_with_marker_autoscale()
+
+        def _on_genome_axis(ev):
+            st = launcher._cnv_state.setdefault(str(sample_dir), {})
+            value = _val(ev, "auto")
+            if isinstance(value, dict):
+                value = value.get("value", value.get("label"))
+            st["genome_axis"] = str(value or "auto")
+            try:
+                if getattr(cnv_genome_axis, "value", None):
+                    st["genome_axis"] = str(cnv_genome_axis.value)
+            except Exception:
+                pass
+            _force_redraw_with_marker_autoscale()
+
+        def _on_trend(ev):
+            st = launcher._cnv_state.setdefault(str(sample_dir), {})
+            st["show_trend"] = _switch_bool(ev, default=True)
+            try:
+                if isinstance(getattr(cnv_trend, "value", None), bool):
+                    st["show_trend"] = bool(cnv_trend.value)
+            except Exception:
+                pass
+            st["_force_chrom_refresh"] = True
+            _force_redraw_with_marker_autoscale()
+
         def _on_color(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
             st["color_mode"] = "value" if _switch_bool(ev, default=False) else "chromosome"
@@ -3913,6 +5034,77 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         cnv_bp.on("update:model-value", _on_bp)
         cnv_color.on("change", _on_color)
         cnv_color.on("update:model-value", _on_color)
+        cnv_trend.on("change", _on_trend)
+        cnv_trend.on("update:model-value", _on_trend)
+        cnv_cutoff.on("change", _on_cutoff)
+        cnv_cutoff.on("update:model-value", _on_cutoff)
+        cnv_chrom_axis.on("change", _on_chrom_axis)
+        cnv_chrom_axis.on("update:model-value", _on_chrom_axis)
+        cnv_genome_axis.on("change", _on_genome_axis)
+        cnv_genome_axis.on("update:model-value", _on_genome_axis)
+        cnv_gene_label.on("change", _on_gene_label)
+        cnv_gene_label.on("update:model-value", _on_gene_label)
+        cnv_label_orient.on("change", _on_label_orient)
+        cnv_label_orient.on("update:model-value", _on_label_orient)
+
+        async def _download_cnv_pdf(kind: str, button: Any) -> None:
+            """Render the report CNV figures for this sample and hand back a PDF."""
+            if not _cnv_export_allowed(launcher):
+                return
+            st = launcher._cnv_state.setdefault(str(sample_dir), {})
+            use_log2, export_kwargs = cnv_export_settings(launcher, sample_dir)
+            scope = None
+            try:
+                from robin.gui.plotting_preferences import (
+                    resolve_plotting_reference_contig_scope,
+                )
+
+                scope = resolve_plotting_reference_contig_scope(
+                    getattr(launcher, "plotting_preferences", None)
+                )
+            except Exception:
+                logging.debug("Could not resolve contig scope for CNV PDF", exc_info=True)
+
+            button.disable()
+            ui.notify("Building CNV PDF…", type="ongoing")
+            try:
+                from robin.reporting.cnv_export import (
+                    CnvExportUnavailable,
+                    build_cnv_pdf,
+                )
+
+                # Matplotlib rendering is slow enough to stall the event loop.
+                payload, filename = await asyncio.to_thread(
+                    build_cnv_pdf,
+                    sample_dir,
+                    kind=kind,
+                    use_log2=use_log2,
+                    configured_genes=configured_gene_names,
+                    reference_contig_scope=scope,
+                    plot_bin_width=st.get("plot_bin_width"),
+                    **export_kwargs,
+                )
+            except CnvExportUnavailable as exc:
+                ui.notify(str(exc), type="warning")
+                return
+            except Exception as exc:
+                logging.exception("CNV PDF export failed")
+                ui.notify(f"CNV PDF export failed: {exc}", type="negative")
+                return
+            finally:
+                button.enable()
+
+            if not payload:
+                ui.notify("No CNV plots could be rendered for this sample", type="warning")
+                return
+            ui.download(payload, filename=filename, media_type="application/pdf")
+
+        cnv_pdf_genome_btn.on_click(
+            lambda _e: _download_cnv_pdf("genome", cnv_pdf_genome_btn)
+        )
+        cnv_pdf_chrom_btn.on_click(
+            lambda _e: _download_cnv_pdf("chromosomes", cnv_pdf_chrom_btn)
+        )
     except Exception:
         pass
 

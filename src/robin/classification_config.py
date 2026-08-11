@@ -5,28 +5,28 @@ This module provides a single source of truth for confidence thresholds
 and CNV classification rules used across the robin application (GUI, reporting, etc.).
 """
 
-from typing import Dict, Tuple, Any
+from typing import Any, Dict, Optional, Tuple
 
 # Confidence thresholds for different classifiers
 CLASSIFIER_CONFIDENCE_THRESHOLDS: Dict[str, Dict[str, float]] = {
     "sturgeon": {
-        "high": 95.0,
-        "medium": 80.0,
+        "high": 98.9,
+        "medium": 84.99,
         "low": 0.0,
     },
     "nanodx": {
-        "high": 50.0,
-        "medium": 25.0,
+        "high": 14.99,
+        "medium": 9.99,
         "low": 0.0,
     },
     "pannanodx": {
-        "high": 50.0,
-        "medium": 25.0,
+        "high": 4.99,
+        "medium": 2.99,
         "low": 0.0,
     },
     "random_forest": {
-        "high": 85.0,
-        "medium": 65.0,
+        "high": 98.99,
+        "medium": 84.99,
         "low": 0.0,
     },
     "marlin": {
@@ -193,6 +193,33 @@ def get_cnv_thresholds(chromosome: str, sex_estimate: str) -> Tuple[float, float
         thresholds = CNV_THRESHOLDS["autosomes"]
     
     return thresholds["gain"], thresholds["loss"]
+
+
+def resolve_cnv_thresholds(
+    chromosome: str,
+    sex_estimate: str,
+    cutoff_override: Optional[float] = None,
+) -> Tuple[float, float]:
+    """Gain/loss thresholds in force, honouring a review cut-off override.
+
+    With no override these are the configured calling thresholds, which vary by
+    contig and sex. An override replaces them with one symmetric log2 cut-off for
+    every contig: it is a single number chosen by a reviewer, so it cannot carry
+    per-contig expectations, and applying it selectively would mean a report drawn
+    at one cut-off calling chrX at another.
+
+    Every consumer of the cut-off resolves it here, so the figures, the event
+    tables, the gene states and the CNV load cannot disagree about what was
+    called.
+    """
+    if cutoff_override is not None:
+        try:
+            magnitude = abs(float(cutoff_override))
+        except (TypeError, ValueError):
+            magnitude = 0.0
+        if magnitude > 0:
+            return magnitude, -magnitude
+    return get_cnv_thresholds(chromosome, sex_estimate)
 
 def is_whole_chromosome_event(
     p_arm_mean: float,

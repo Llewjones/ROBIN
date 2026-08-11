@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import re
+
+from typing import Sequence
 
 import numpy as np
 import pandas as pd
@@ -20,10 +23,382 @@ from robin.reference_contigs import CANONICAL_CONTIG_RE, is_canonical_contig
 REPORTABLE_CHROMOSOME_RE = CANONICAL_CONTIG_RE
 SIGNIFICANT_CNV_STATES = {"GAIN", "LOSS", "HIGH_GAIN", "DEEP_LOSS"}
 
+#: Cytoband stains with no uniquely mappable sequence: centromeres (``acen``),
+#: heterochromatin (``gvar``) and acrocentric stalks (``stalk``). Read depth
+#: there reflects mappability, not copy number — on the log2 track these bands
+#: sit at −3 to −5 — so they are reported as not assessed rather than as losses.
+UNMAPPABLE_CYTOBAND_STAINS = frozenset({"acen", "gvar", "stalk"})
+
 
 def is_reportable_chromosome(chromosome: str) -> bool:
     """Return True for standard autosomes/sex chromosomes used in CNV reporting."""
     return is_canonical_contig(chromosome)
+
+
+def _resource_path(filename: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(resources.__file__)), filename)
+
+
+def load_cytobands_bed() -> pd.DataFrame:
+    """Packaged GRCh38 cytoband table, empty when the resource is missing."""
+    columns = ["chrom", "start_pos", "end_pos", "name", "stain"]
+    path = _resource_path("cytoBand.txt")
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=columns)
+    try:
+        return pd.read_csv(path, sep="\t", names=columns)
+    except Exception:
+        logger.debug("Could not load cytoband resource", exc_info=True)
+        return pd.DataFrame(columns=columns)
+
+
+def load_centromere_bed() -> pd.DataFrame:
+    """Packaged centromere/satellite regions, empty when the resource is missing."""
+    columns = ["chrom", "start_pos", "end_pos", "name"]
+    path = _resource_path("cenSatRegions.bed")
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=columns)
+    try:
+        return pd.read_csv(
+            path,
+            usecols=[0, 1, 2, 3],
+            names=columns,
+            header=None,
+            sep=r"\s+",
+        )
+    except Exception:
+        logger.debug("Could not load centromere resource", exc_info=True)
+        return pd.DataFrame(columns=columns)
+
+
+@functools.lru_cache(maxsize=1)
+def load_centromere_boundaries() -> dict[str, int]:
+    """Genomic position separating the p and q arms of each chromosome.
+
+    Taken as the start of the first q band in the packaged cytoband table, which
+    is the canonical p/q boundary. Falls back to the midpoint of the centromere
+    region when the cytoband resource is unavailable.
+    """
+    boundaries: dict[str, int] = {}
+    cytobands = load_cytobands_bed()
+    if not cytobands.empty:
+        for chrom, bands in cytobands.groupby("chrom"):
+            q_bands = bands[bands["name"].astype(str).str.startswith("q")]
+            if not q_bands.empty:
+                boundaries[str(chrom)] = int(q_bands["start_pos"].min())
+                continue
+            p_bands = bands[bands["name"].astype(str).str.startswith("p")]
+            if not p_bands.empty:
+                boundaries[str(chrom)] = int(p_bands["end_pos"].max())
+    if boundaries:
+        return boundaries
+
+    centromeres = load_centromere_bed()
+    for chrom, regions in centromeres.groupby("chrom"):
+        boundaries[str(chrom)] = int(
+            (regions["start_pos"].min() + regions["end_pos"].max()) / 2
+        )
+    return boundaries
+
+
+def compute_cnv_load(
+    log2_track: dict[str, "np.ndarray"],
+    bin_width: int,
+    sex_estimate: str = "Unknown",
+    cutoff_override: float | None = None,
+) -> dict[str, float]:
+    """Fraction of the assessed genome carrying a called gain or loss.
+
+    Counts bins past the cut-off currently in force, so the load always agrees
+    with the lines drawn on the figures. With no override that is the configured
+    **calling threshold** from ``classification_config``; ``cutoff_override``
+    applies a symmetric log2 cut-off instead, matching the review Cut-off menu.
+
+    The cut-off used is returned as ``cutoff`` and ``cutoff_label`` so that every
+    place the load is shown can say which threshold produced it — a load figure
+    is not comparable between samples reviewed at different cut-offs.
+
+    Bins with no data are excluded from both the numerator and the denominator,
+    so an incompletely covered genome reports load over what was actually
+    assessed rather than diluting it toward zero.
+
+    Returns Mb and percentage for gain, loss and the two combined, plus the
+    assessed span the percentages are taken over.
+    """
+    from robin.classification_config import resolve_cnv_thresholds
+
+    override = None
+    if cutoff_override is not None:
+        try:
+            override = abs(float(cutoff_override))
+        except (TypeError, ValueError):
+            override = None
+        if override is not None and not np.isfinite(override):
+            override = None
+
+    bin_mb = float(bin_width) / 1_000_000.0
+    assessed = gained = lost = 0
+    for chrom, values in (log2_track or {}).items():
+        if not is_reportable_chromosome(chrom):
+            continue
+        array = np.asarray(values, dtype=float)
+        finite = array[np.isfinite(array)]
+        if finite.size == 0:
+            continue
+        gain_threshold, loss_threshold = resolve_cnv_thresholds(
+            chrom, sex_estimate, override
+        )
+        assessed += int(finite.size)
+        gained += int(np.count_nonzero(finite >= gain_threshold))
+        lost += int(np.count_nonzero(finite <= loss_threshold))
+
+    assessed_mb = assessed * bin_mb
+
+    def _percent(count: int) -> float:
+        return (count / assessed * 100.0) if assessed else 0.0
+
+    # One shared formatter, so a heading in the GUI, the report and the CSV all
+    # name the cut-off the same way.
+    try:
+        from robin.gui.plotting_preferences import cnv_cutoff_label
+
+        cutoff_label = cnv_cutoff_label(override)
+    except Exception:  # pragma: no cover - GUI package unavailable
+        cutoff_label = f"\u00b1{override:g}" if override else "calling"
+
+    return {
+        "cutoff": override,
+        "cutoff_label": cutoff_label,
+        "assessed_mb": assessed_mb,
+        "gain_mb": gained * bin_mb,
+        "loss_mb": lost * bin_mb,
+        "total_mb": (gained + lost) * bin_mb,
+        "gain_percent": _percent(gained),
+        "loss_percent": _percent(lost),
+        "total_percent": _percent(gained + lost),
+    }
+
+
+#: Label used when a listed target carries no called event, so the table always
+#: says "looked at, nothing found" rather than leaving a blank cell.
+CNV_NO_EVENT_LABEL = "No CNVs Detected"
+#: Label for a listed gene that is not on the sample's target panel. Off-panel
+#: sequence is background coverage only, so the gene was NOT assessed — which is
+#: a different statement from having looked and found nothing, and must never be
+#: reported as "No CNVs Detected".
+CNV_GENE_NOT_LOCATED_LABEL = "Not on panel"
+#: Label for a target that IS on the panel but has no CNV data covering it yet —
+#: early in a run, or a dropout. Again distinct from "looked and found nothing".
+CNV_GENE_NO_DATA_LABEL = "No data yet"
+#: Label for a gene ROBIN cannot place at all — absent from the panel and from
+#: the packaged gene references. Distinct from being off-panel: this one could
+#: not even be looked for, so it says nothing about the locus.
+CNV_GENE_UNKNOWN_LABEL = "Not in reference"
+
+
+def compute_target_gene_cnv_states(
+    log2_track: dict[str, "np.ndarray"],
+    bin_width: int,
+    genes: "Sequence[str]",
+    sex_estimate: str = "Unknown",
+    gene_frames: "Sequence[pd.DataFrame] | None" = None,
+    cutoff_override: float | None = None,
+) -> list[dict]:
+    """Gain/loss state for each named target, in the order given.
+
+    Every requested gene comes back, including ones with no event, so the table
+    can state that a target was assessed and nothing was found. A gene that is
+    not on the sample's panel is reported as such rather than as "no CNVs":
+    off-panel sequence is background coverage, so the gene was not assessed, and
+    the two are clinically different statements.
+
+    The value taken for a gene is the mean across its bins, with a focal event
+    reported at its own depth — the same rule the plots use for gene markers —
+    judged against the cut-off in force, so the table agrees with the figures.
+    """
+    from robin.classification_config import resolve_cnv_thresholds
+    from robin.cnv_plot_style import gene_bin_window, robust_gene_value
+
+    frames = [f for f in (gene_frames or [load_gene_bed()]) if f is not None and not f.empty]
+    override = None
+    if cutoff_override is not None:
+        try:
+            candidate = abs(float(cutoff_override))
+            override = candidate if np.isfinite(candidate) else None
+        except (TypeError, ValueError):
+            override = None
+
+    def _bed_gene_names(value) -> set[str]:
+        """Every gene name a BED row stands for, upper-cased.
+
+        A row may cover several overlapping genes and names them together, joined
+        with commas or slashes — ``CDKN2A,CDKN2B,CDKN2B-AS1``. Comparing a
+        requested gene against the joined string never matches, which reported
+        CDKN2A, CDK4 and MTAP as "not in reference" on samples that plainly had
+        them: 20 of the 45 NGTD loci on one archived sample, including a CDKN2A
+        homozygous deletion that was independently confirmed.
+        """
+        text = str(value).upper()
+        for separator in (",", "/", ";"):
+            text = text.replace(separator, "|")
+        return {part.strip() for part in text.split("|") if part.strip()}
+
+    def _locate(gene: str):
+        """Return (hit, on_panel). The first frame is the sample's panel.
+
+        A label may name several genes at one locus, separated by ``/`` — for
+        example ``CDKN2B/CDKN2B-AS1``. Overlapping transcripts share the same CNV
+        bins, so they cannot be told apart at this resolution and are reported as
+        one row; the alternatives are tried in order until one is found.
+        """
+        for alternative in [part.strip() for part in str(gene).split("/") if part.strip()]:
+            wanted = alternative.upper()
+            for index, frame in enumerate(frames):
+                names = frame["gene"].map(_bed_gene_names)
+                hit = frame[names.map(lambda s: wanted in s)]
+                if not hit.empty:
+                    return hit, index == 0
+        return None, False
+
+    results: list[dict] = []
+    for gene in genes:
+        name = str(gene).strip()
+        if not name:
+            continue
+        hit, on_panel = _locate(name)
+        row = {
+            "gene": name,
+            "chrom": None,
+            "value": None,
+            "state": CNV_GENE_UNKNOWN_LABEL,
+            "located": False,
+            "on_panel": False,
+        }
+        if hit is None:
+            results.append(row)
+            continue
+        if not on_panel:
+            # Placed on the genome, but not a target on this panel: the only
+            # coverage there is background, so it was not assessed.
+            row["chrom"] = str(hit.iloc[0]["chrom"])
+            row["state"] = CNV_GENE_NOT_LOCATED_LABEL
+            results.append(row)
+            continue
+
+        # Bins are pooled across every interval the gene has, then judged once.
+        # Taking the most extreme interval instead let an annotation fragment
+        # decide: unique_genes.bed carries EGFR twice, as the real 63 kb gene and
+        # as a 205 bp stub, and the stub resolves to a single bin with no noise
+        # protection. In testing that stub read as a clear loss while the gene
+        # as a whole was unchanged.
+        best_value = None
+        best_chrom = None
+        for chrom, chrom_rows in hit.groupby(hit["chrom"].astype(str)):
+            values = log2_track.get(chrom)
+            if values is None:
+                continue
+            array = np.asarray(values, dtype=float)
+            spans: list[tuple[int, int]] = []
+            for _, interval in chrom_rows.iterrows():
+                start, stop = gene_bin_window(
+                    int(interval["start_pos"]) // bin_width,
+                    int(interval["end_pos"]) // bin_width + 1,
+                    len(array),
+                )
+                if stop > start:
+                    spans.append((start, stop))
+            if not spans:
+                continue
+            # Merge overlapping or touching spans so a bin is counted once.
+            spans.sort()
+            merged = [spans[0]]
+            for start, stop in spans[1:]:
+                if start <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(merged[-1][1], stop))
+                else:
+                    merged.append((start, stop))
+            # NaN between blocks: separate targets are not adjacent bins, so a
+            # focal run must not be allowed to bridge them.
+            pieces: list[np.ndarray] = []
+            for start, stop in merged:
+                if pieces:
+                    pieces.append(np.array([np.nan]))
+                pieces.append(array[start:stop])
+            window = np.concatenate(pieces)
+            if not np.isfinite(window).any():
+                continue
+            cutoff = abs(
+                resolve_cnv_thresholds(chrom, sex_estimate, override)[0]
+            )
+            # Averaged across the gene, with a focal event kept at its own depth
+            # when consecutive bins support it. The peak bin alone is a max-of-N
+            # statistic and called a neutral five-bin gene about half the time.
+            candidate = robust_gene_value(window, cutoff=cutoff)
+            if best_value is None or abs(candidate) > abs(best_value):
+                best_value, best_chrom = candidate, chrom
+
+        if best_value is None:
+            # On the panel, but no CNV bins cover it yet. Distinct from being
+            # off-panel: this one is expected to fill in as the run accumulates.
+            row["state"] = CNV_GENE_NO_DATA_LABEL
+            row["located"] = True
+            row["on_panel"] = True
+            row["chrom"] = str(hit.iloc[0]["chrom"])
+            results.append(row)
+            continue
+
+        gain_threshold, loss_threshold = resolve_cnv_thresholds(
+            best_chrom, sex_estimate, override
+        )
+        if best_value >= gain_threshold:
+            state = "GAIN"
+        elif best_value <= loss_threshold:
+            state = "LOSS"
+        else:
+            state = CNV_NO_EVENT_LABEL
+        results.append(
+            {
+                "gene": name,
+                "chrom": best_chrom,
+                "value": best_value,
+                "state": state,
+                "located": True,
+                "on_panel": True,
+            }
+        )
+    return results
+
+
+#: Heading used for the CNV load block wherever it is shown.
+CNV_LOAD_TITLE = "CNV load"
+
+
+def cnv_load_summary_text(load: dict[str, float] | None) -> str:
+    """One-line CNV load summary, shared by the GUI and every PDF."""
+    if not load or not load.get("assessed_mb"):
+        return ""
+    label = load.get("cutoff_label")
+    heading = f"{CNV_LOAD_TITLE} (cut-off {label})" if label else CNV_LOAD_TITLE
+    return (
+        f"{heading}: {load['total_percent']:.1f}% "
+        f"({load['total_mb']:,.0f} Mb)  \u00b7  "
+        f"gain {load['gain_percent']:.1f}% ({load['gain_mb']:,.0f} Mb)  \u00b7  "
+        f"loss {load['loss_percent']:.1f}% ({load['loss_mb']:,.0f} Mb)  \u00b7  "
+        f"of {load['assessed_mb']:,.0f} Mb assessed"
+    )
+
+
+def load_gene_bed() -> pd.DataFrame:
+    """Packaged unique gene BED used for annotating CNV events."""
+    columns = ["chrom", "start_pos", "end_pos", "gene"]
+    path = _resource_path("unique_genes.bed")
+    if not os.path.exists(path):
+        return pd.DataFrame(columns=columns)
+    try:
+        return pd.read_csv(path, sep="\t", names=columns)
+    except Exception:
+        logger.debug("Could not load gene bed resource", exc_info=True)
+        return pd.DataFrame(columns=columns)
 
 
 def load_panel_gene_bed(output_dir: str) -> tuple[str | None, pd.DataFrame]:
@@ -211,6 +586,21 @@ def format_regional_event_table_row(event: dict) -> dict:
     }
 
 
+def _nan_safe(values, reducer, default: float = 0.0) -> float:
+    """Reduce ignoring NaNs, returning ``default`` when nothing is finite.
+
+    The log2 track carries NaN wherever a bin had no coverage, which the
+    sample-minus-reference track this analysis used to run on never did. A plain
+    mean over those bins returns NaN, which then silently disables every
+    threshold comparison downstream (NaN compares False against everything).
+    """
+    array = np.asarray(values, dtype=float)
+    array = array[np.isfinite(array)]
+    if array.size == 0:
+        return default
+    return float(reducer(array))
+
+
 def analyze_cytoband_cnv(
     cnv_data: dict,
     chromosome: str,
@@ -219,10 +609,27 @@ def analyze_cytoband_cnv(
     centromere_bed: pd.DataFrame,
     gene_bed: pd.DataFrame,
     sex_estimate: str,
+    cutoff_override: float | None = None,
 ) -> pd.DataFrame:
     """
     Analyze CNV values within each cytoband to detect duplications and deletions.
-    Uses dynamic thresholds based on data variation for more robust detection.
+
+    Expects ``cnv_data`` on the **log2(ploidy / expected copy number)** scale, so
+    that the calling cut-off means the same thing here as everywhere else. Build
+    it with ``compute_cnv_log2_from_ploidy()``.
+
+    This previously ran on the sample-minus-reference difference track, which is
+    wrong twice over: it is in copies rather than log2, and the reference pass
+    re-processes the same BAM on top of the reference baseline, so it inherits
+    the sample's own aberration and cancels most of the signal. On a sample with
+    a clear whole-chromosome gain (chr7 at ploidy 3.14) the reference sat at
+    2.89, leaving a difference of 0.26 — under the cut-off — and the regional
+    table reported nothing at all.
+
+    Thresholds adapt to the variation in the data, and are then gated on the
+    configured calling cut-off so that a region is only reported when it crosses
+    both. Without the gate the adaptive rule reports regions on a completely flat
+    chromosome, because it measures against that chromosome's own mean.
     """
     logger.debug(f"\n{'='*50}")
     logger.debug(f"Starting CNV analysis for {chromosome}")
@@ -260,10 +667,20 @@ def analyze_cytoband_cnv(
             cent_end_bin = int(centromere["end_pos"].iloc[0] / bin_width)
             mask[cent_start_bin:cent_end_bin] = False
             logger.debug(f"Excluded centromere region: {cent_start_bin}-{cent_end_bin}")
+        # Unmappable bands would drag the chromosome mean down and inflate its
+        # SD, which loosens the adaptive thresholds derived from both.
+        unmappable = chromosome_cytobands[
+            chromosome_cytobands["stain"].astype(str).isin(UNMAPPABLE_CYTOBAND_STAINS)
+        ]
+        for _, band in unmappable.iterrows():
+            lo = max(0, int(band["start_pos"] / bin_width))
+            hi = min(len(mask), int(band["end_pos"] / bin_width) + 1)
+            if hi > lo:
+                mask[lo:hi] = False
         chr_cnv = cnv_data[chromosome][mask]
 
-        chr_mean = np.mean(chr_cnv)
-        chr_std = np.std(chr_cnv)
+        chr_mean = _nan_safe(chr_cnv, np.mean)
+        chr_std = _nan_safe(chr_cnv, np.std)
         logger.debug(f"Chromosome-wide mean: {chr_mean:.3f}, std: {chr_std:.3f}")
 
         chromosome_means = []
@@ -277,10 +694,10 @@ def analyze_cytoband_cnv(
                     mask[cent_start:cent_end] = False
                 chrom_data = cnv_data[chrom][mask]
                 if len(chrom_data) > 0:
-                    chromosome_means.append(np.mean(chrom_data))
+                    chromosome_means.append(_nan_safe(chrom_data, np.mean))
 
-        means_std = np.std(chromosome_means)
-        means_mean = np.mean(chromosome_means)
+        means_std = _nan_safe(chromosome_means, np.std)
+        means_mean = _nan_safe(chromosome_means, np.mean)
         logger.debug(
             f"Mean of chromosome means: {means_mean:.3f}, std of means: {means_std:.3f}"
         )
@@ -312,6 +729,24 @@ def analyze_cytoband_cnv(
             cytoband_gain_threshold = chr_mean + (1.0 * chr_std)
             cytoband_loss_threshold = chr_mean - (1.0 * chr_std)
 
+        # Gate the adaptive thresholds on the configured calling cut-off, so a
+        # region is only called when it crosses BOTH. The adaptive rule is
+        # relative to the chromosome's own noise, which means a flat chromosome
+        # still produces regions above and below its own mean — on a track held
+        # at log2 -0.10 it reported three GAIN/LOSS regions, all well inside the
+        # +-0.3 window. Taking the stricter of the two keeps the adaptive rule
+        # where it is more conservative (a noisy sample raises the bar) while
+        # guaranteeing nothing inside the calling window is ever reported.
+        from robin.classification_config import resolve_cnv_thresholds
+
+        calling_gain, calling_loss = resolve_cnv_thresholds(
+            chromosome, sex_estimate, cutoff_override
+        )
+        gain_threshold = max(gain_threshold, calling_gain)
+        loss_threshold = min(loss_threshold, calling_loss)
+        cytoband_gain_threshold = max(cytoband_gain_threshold, calling_gain)
+        cytoband_loss_threshold = min(cytoband_loss_threshold, calling_loss)
+
         logger.debug(
             f"Thresholds - Whole chr gain: {gain_threshold:.3f}, loss: {loss_threshold:.3f}"
         )
@@ -319,22 +754,47 @@ def analyze_cytoband_cnv(
             f"Thresholds - Cytoband gain: {cytoband_gain_threshold:.3f}, loss: {cytoband_loss_threshold:.3f}"
         )
 
-        bins_above_gain = np.sum(chr_cnv > gain_threshold) / len(chr_cnv)
-        bins_below_loss = np.sum(chr_cnv < loss_threshold) / len(chr_cnv)
+        # Whole-chromosome calls defer to the same rule the Arm / Whole-Chromosome
+        # table uses, so the two tables cannot disagree. The rule this replaces
+        # compared the chromosome against the spread of all chromosome means,
+        # which inflates as the rest of the genome becomes more aberrant: a
+        # chromosome uniformly gained at log2 +0.55 was reported on a quiet
+        # genome and silently dropped once four other chromosomes were aberrant.
+        # That is backwards — an aneuploid tumour is where these calls matter.
+        from robin.analysis.cnv_classification import analyze_chromosome_arms
+        from robin.classification_config import is_whole_chromosome_event
 
-        logger.debug(
-            f"Proportion of bins - Above gain: {bins_above_gain:.3f}, Below loss: {bins_below_loss:.3f}"
-        )
-
-        min_proportion = 0.7
-        if bins_above_gain > min_proportion:
-            whole_chr_event = True
-            whole_chr_state = "GAIN"
-            logger.debug(f"WHOLE CHROMOSOME EVENT DETECTED: {chromosome} GAIN")
-        elif bins_below_loss > min_proportion:
-            whole_chr_event = True
-            whole_chr_state = "LOSS"
-            logger.debug(f"WHOLE CHROMOSOME EVENT DETECTED: {chromosome} LOSS")
+        try:
+            (
+                p_arm_mean,
+                q_arm_mean,
+                p_gain,
+                p_loss,
+                q_gain,
+                q_loss,
+            ) = analyze_chromosome_arms(
+                cnv_data, chromosome, bin_width, sex_estimate, cytobands_bed
+            )
+            if p_arm_mean is not None and q_arm_mean is not None:
+                whole_chr_event, whole_chr_state = is_whole_chromosome_event(
+                    p_arm_mean,
+                    q_arm_mean,
+                    p_gain,
+                    p_loss,
+                    q_gain,
+                    q_loss,
+                    calling_gain,
+                    calling_loss,
+                )
+        except Exception:
+            logger.debug(
+                "Whole-chromosome check failed for %s", chromosome, exc_info=True
+            )
+            whole_chr_event = False
+        if whole_chr_event:
+            logger.debug(
+                f"WHOLE CHROMOSOME EVENT DETECTED: {chromosome} {whole_chr_state}"
+            )
 
         if whole_chr_event:
             genes_in_chr = gene_bed[gene_bed["chrom"] == chromosome]["gene"].tolist()
@@ -358,9 +818,19 @@ def analyze_cytoband_cnv(
             start_bin = int(cytoband["start_pos"] / bin_width)
             end_bin = int(cytoband["end_pos"] / bin_width)
 
-            if start_bin < len(cnv_data[chromosome]):
+            if str(cytoband.get("stain", "")) in UNMAPPABLE_CYTOBAND_STAINS:
+                # Centromeric, heterochromatic and acrocentric stalk bands carry
+                # no uniquely mappable sequence, so their depth is not a copy
+                # number. On the log2 track they read as deep losses (−3 to −5)
+                # and would otherwise dominate the table: 34 regional events on
+                # this sample, of which every one of the top ten was one of
+                # these. Not assessed rather than normal — they are genuinely
+                # unmeasurable, not measured and found unchanged.
+                mean_cnv = 0
+                state = "NO_DATA"
+            elif start_bin < len(cnv_data[chromosome]):
                 region_cnv = cnv_data[chromosome][start_bin : end_bin + 1]
-                mean_cnv = np.mean(region_cnv) if len(region_cnv) > 0 else 0
+                mean_cnv = _nan_safe(region_cnv, np.mean)
 
                 if mean_cnv > cytoband_gain_threshold:
                     state = "GAIN"
@@ -400,7 +870,7 @@ def analyze_cytoband_cnv(
                 current_group["name"] = (
                     f"{current_group['chrom']} {current_group['bands'][0]}-{current_group['bands'][-1]}"
                 )
-                current_group["mean_cnv"] = np.mean(current_group["mean_cnv"])
+                current_group["mean_cnv"] = _nan_safe(current_group["mean_cnv"], np.mean)
                 current_group["length"] = (
                     current_group["end_pos"] - current_group["start_pos"]
                 )
@@ -433,7 +903,7 @@ def analyze_cytoband_cnv(
             current_group["name"] = (
                 f"{current_group['chrom']} {current_group['bands'][0]}-{current_group['bands'][-1]}"
             )
-            current_group["mean_cnv"] = np.mean(current_group["mean_cnv"])
+            current_group["mean_cnv"] = _nan_safe(current_group["mean_cnv"], np.mean)
             current_group["length"] = (
                 current_group["end_pos"] - current_group["start_pos"]
             )

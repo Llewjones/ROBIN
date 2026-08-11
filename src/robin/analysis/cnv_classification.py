@@ -21,6 +21,7 @@ except ImportError:  # pragma: no cover
 
 from robin.classification_config import (
     get_cnv_thresholds,
+    resolve_cnv_thresholds,
     is_whole_chromosome_event,
     is_arm_event,
     is_resolution_sufficient
@@ -97,7 +98,8 @@ def analyze_chromosome_arms(
     chromosome: str,
     bin_width: int,
     sex_estimate: str,
-    cytobands_df: pd.DataFrame
+    cytobands_df: pd.DataFrame,
+    cutoff_override: Optional[float] = None,
 ) -> Tuple[
     Optional[float],
     Optional[float],
@@ -119,7 +121,9 @@ def analyze_chromosome_arms(
     if chromosome not in cnv_data:
         return None, None, 0.0, 0.0, 0.0, 0.0
 
-    gain_threshold, loss_threshold = get_cnv_thresholds(chromosome, sex_estimate)
+    gain_threshold, loss_threshold = resolve_cnv_thresholds(
+        chromosome, sex_estimate, cutoff_override
+    )
 
     chr_cytobands = cytobands_df[cytobands_df["chrom"] == chromosome]
     if chr_cytobands.empty:
@@ -198,7 +202,8 @@ def detect_cnv_events(
     bin_width: int,
     sex_estimate: str,
     cytobands_df: pd.DataFrame,
-    gene_df: Optional[pd.DataFrame] = None
+    gene_df: Optional[pd.DataFrame] = None,
+    cutoff_override: Optional[float] = None,
 ) -> List[CNVEvent]:
     """
     Detect CNV events using centralized classification rules.
@@ -213,6 +218,9 @@ def detect_cnv_events(
         sex_estimate: Sex estimate
         cytobands_df: Cytobands dataframe
         gene_df: Optional gene dataframe
+        cutoff_override: Symmetric log2 cut-off to call against instead of the
+            configured calling thresholds. Set from the review Cut-off control,
+            so the events table reports what the reviewer is looking at.
 
     Returns:
         List of CNVEvent objects
@@ -240,7 +248,9 @@ def detect_cnv_events(
         logger.debug(f"Analyzing chromosome {chromosome} for CNV events")
         
         # Get thresholds
-        gain_threshold, loss_threshold = get_cnv_thresholds(chromosome, sex_estimate)
+        gain_threshold, loss_threshold = resolve_cnv_thresholds(
+            chromosome, sex_estimate, cutoff_override
+        )
         
         (
             p_arm_mean,
@@ -250,7 +260,12 @@ def detect_cnv_events(
             q_arm_proportion_gain,
             q_arm_proportion_loss,
         ) = analyze_chromosome_arms(
-            cnv_data, chromosome, bin_width, sex_estimate, cytobands_df
+            cnv_data,
+            chromosome,
+            bin_width,
+            sex_estimate,
+            cytobands_df,
+            cutoff_override=cutoff_override,
         )
         
         # Check for whole chromosome events

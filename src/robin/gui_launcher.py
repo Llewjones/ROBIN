@@ -573,6 +573,61 @@ class GUILauncher:
         self.progress_notification_event = Event[Dict[str, Any]]()
         # CNV per-sample cache
         self._cnv_state: Dict[str, Dict[str, Any]] = {}
+
+    #: CNV panel session state -> the plotting preference it overrides. The
+    #: controls on the CNV section are per-sample session state, while a report
+    #: is built from the persisted admin preferences; without this mapping the
+    #: two disagree silently, and the report shows settings the reviewer can see
+    #: they did not choose.
+    _CNV_LIVE_PREFERENCE_KEYS = {
+        "cutoff": "cnv_gui_cutoff",
+        "genome_axis": "cnv_gui_genome_axis",
+        "chrom_axis": "cnv_gui_chrom_axis",
+        "gene_label_size": "cnv_gui_gene_label_size",
+        "label_orientation": "cnv_gui_label_orientation",
+        "color_mode": "cnv_gui_color_mode",
+        "gene_coverage_filter": "cnv_gui_gene_coverage_filter",
+    }
+    _CNV_LIVE_PREFERENCE_FLAGS = {
+        "show_trend": "cnv_gui_show_trend_line",
+        "show_bp": "cnv_gui_show_breakpoints",
+    }
+
+    def _plotting_preferences_for_sample(self, sample_dir) -> Any:
+        """Admin plotting preferences with this sample's live CNV panel applied.
+
+        A report generated from the CNV section should show what the reviewer is
+        looking at. Reading only the persisted admin defaults meant the Cut-off,
+        the Y-ranges and the label settings on screen were ignored, so the report
+        could differ from the panel it was generated from with nothing to say so.
+        """
+        prefs = self.plotting_preferences
+        try:
+            state = self._cnv_state.get(str(sample_dir)) or {}
+        except Exception:
+            return prefs
+        if not state:
+            return prefs
+
+        updates: Dict[str, Any] = {}
+        for state_key, pref_key in self._CNV_LIVE_PREFERENCE_KEYS.items():
+            value = state.get(state_key)
+            if value:
+                updates[pref_key] = str(value)
+        for state_key, pref_key in self._CNV_LIVE_PREFERENCE_FLAGS.items():
+            value = state.get(state_key)
+            if value is not None:
+                updates[pref_key] = bool(value)
+        if not updates:
+            return prefs
+        try:
+            return prefs.with_updates(**updates)
+        except Exception:
+            logging.debug(
+                "Could not apply the live CNV panel settings to report preferences",
+                exc_info=True,
+            )
+            return prefs
         self._component_state_max_samples = 24
         # Cache last seen queue status so we can populate immediately on page creation
         self._last_queue_status: Dict[str, Any] = {}
@@ -3993,7 +4048,7 @@ class GUILauncher:
                                                     viewer_role=resolve_viewer_role(self),
                                                     generated_by=report_meta["generated_by"] or None,
                                                     generated_at=report_meta["generated_at"],
-                                                    plotting_preferences=self.plotting_preferences,
+                                                    plotting_preferences=self._plotting_preferences_for_sample(sample_dir),
                                                 )
                                             else:
                                                 # Use custom callback that updates dialog only
@@ -4017,7 +4072,7 @@ class GUILauncher:
                                                     viewer_role=resolve_viewer_role(self),
                                                     generated_by=report_meta["generated_by"] or None,
                                                     generated_at=report_meta["generated_at"],
-                                                    plotting_preferences=self.plotting_preferences,
+                                                    plotting_preferences=self._plotting_preferences_for_sample(sample_dir),
                                                 )
 
                                             if bool(state.get("export_pdf", True)):
@@ -5499,7 +5554,7 @@ class GUILauncher:
                         sample_identifiers=state.get("sample_identifiers"),
                         generated_by=report_meta["generated_by"] or None,
                         generated_at=report_meta["generated_at"],
-                        plotting_preferences=self.plotting_preferences,
+                        plotting_preferences=self._plotting_preferences_for_sample(sample_dir),
                     )
 
                     # Mark report as completed
@@ -5619,7 +5674,7 @@ class GUILauncher:
                     viewer_role=resolve_viewer_role(self),
                     generated_by=report_meta["generated_by"] or None,
                     generated_at=report_meta["generated_at"],
-                    plotting_preferences=self.plotting_preferences,
+                    plotting_preferences=self._plotting_preferences_for_sample(sample_dir),
                 )
 
                 # Mark report as completed

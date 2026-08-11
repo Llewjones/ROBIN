@@ -48,6 +48,13 @@ def header_footer_canvas_factory(
             canvas.Canvas.save(self)
 
         def _draw_header_footer(self):
+            # Read the size of the page being drawn rather than assuming A4
+            # portrait: the CNV genome-wide summary is laid out landscape, and a
+            # hard-coded size would put the header and footer off the page.
+            try:
+                self.width, self.height = self._pagesize
+            except Exception:
+                self.width, self.height = A4
             self.saveState()
 
             # Header

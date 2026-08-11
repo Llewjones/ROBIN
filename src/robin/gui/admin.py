@@ -458,6 +458,15 @@ def _build_plotting_preferences_panel(launcher: "GUILauncher") -> None:
         CNV_REPORT_SCALE_NORMALIZED_DIFFERENCE,
         CNV_REPORT_SCALE_PLOIDY,
         PlottingPreferencesConfig,
+        cnv_chrom_axis_options,
+        cnv_chrom_axis_setting,
+        cnv_genome_axis_options,
+        cnv_genome_axis_setting,
+        cnv_cutoff_options,
+        cnv_cutoff_setting,
+        cnv_gene_label_size_options,
+        cnv_gene_label_size_setting,
+        resolve_cnv_label_orientation,
     )
     from robin.reference_contigs import (
         REFERENCE_CONTIG_SCOPE_LABELS,
@@ -543,6 +552,90 @@ def _build_plotting_preferences_panel(launcher: "GUILauncher") -> None:
                 ),
             )
 
+            ui.label("CNV segment line (GUI + report)").classes(
+                "classification-insight-meta font-medium mt-2"
+            )
+            trend_switch = _labeled_switch(
+                left="Hide",
+                right="Show",
+                value=bool(current.cnv_gui_show_trend_line),
+                tooltip=(
+                    "Piecewise-constant segment line drawn over the CNV bin cloud"
+                ),
+            )
+
+            ui.label("CNV gain/loss cut-off (GUI + report)").classes(
+                "classification-insight-meta font-medium mt-2"
+            )
+            ui.label(
+                "Applies everywhere the cut-off is used: the lines and point "
+                "colouring on CNV plots, the Outliers filter, the called regions, "
+                "the events, regional and NGTD tables, the gene states and CNV "
+                "load, in the live view, the PDF reports and the downloads. "
+                "Reports called at a non-default cut-off say so on the figure."
+            ).classes("classification-insight-foot mb-2")
+            cutoff_select = ui.select(
+                cnv_cutoff_options(),
+                value=cnv_cutoff_setting(current.cnv_gui_cutoff),
+                label="Cut-off",
+            ).classes("w-full").props("dense outlined")
+
+            ui.label("CNV gene label size (GUI + report)").classes(
+                "classification-insight-meta font-medium mt-2"
+            )
+            ui.label(
+                "Size of the gene name labels on CNV plots. Point sizes are as "
+                "rendered in the PDF report; the live view is scaled to match."
+            ).classes("classification-insight-foot mb-2")
+            gene_label_select = ui.select(
+                cnv_gene_label_size_options(),
+                value=cnv_gene_label_size_setting(current.cnv_gui_gene_label_size),
+                label="Gene label size",
+            ).classes("w-full").props("dense outlined")
+
+            ui.label("CNV gene label style (GUI + report)").classes(
+                "classification-insight-meta font-medium mt-2"
+            )
+            orientation_switch = _labeled_switch(
+                left="Horizontal",
+                right="Portrait",
+                value=resolve_cnv_label_orientation(
+                    current.cnv_gui_label_orientation
+                ) == "rotated",
+                tooltip=(
+                    "Portrait rotates gene names alongside the marker (array "
+                    "style) and stays compact on a crowded panel"
+                ),
+            )
+
+            ui.label("CNV per-chromosome Y range (GUI + report)").classes(
+                "classification-insight-meta font-medium mt-2"
+            )
+            ui.label(
+                "Fixed Y range for single-chromosome views and the per-chromosome "
+                "report plots, so chromosomes can be compared directly. Bins outside "
+                "the range are flagged at the panel edge, never dropped."
+            ).classes("classification-insight-foot mb-2")
+            chrom_axis_select = ui.select(
+                cnv_chrom_axis_options(),
+                value=cnv_chrom_axis_setting(current.cnv_gui_chrom_axis),
+                label="Y range",
+            ).classes("w-full").props("dense outlined")
+
+            ui.label("Genome-wide Y range").classes(
+                "classification-insight-meta font-medium mt-2"
+            )
+            ui.label(
+                "Fixed Y range for the genome-wide summary and its PDF. Defaults to "
+                "Auto: unlike the per-chromosome plots there is only one genome-wide "
+                "panel, so there is nothing to compare a fixed window against."
+            ).classes("classification-insight-foot mb-2")
+            genome_axis_select = ui.select(
+                cnv_genome_axis_options(),
+                value=cnv_genome_axis_setting(current.cnv_gui_genome_axis),
+                label="Genome Y range",
+            ).classes("w-full").props("dense outlined")
+
             ui.label("Reference contigs in plots").classes(
                 "classification-insight-meta font-medium mt-2"
             )
@@ -587,6 +680,18 @@ def _build_plotting_preferences_panel(launcher: "GUILauncher") -> None:
                     cnv_gui_gene_coverage_filter=gene_filter,
                     cnv_gui_color_mode=color_mode,
                     cnv_gui_show_breakpoints=bool(bp_switch.value),
+                    cnv_gui_show_trend_line=bool(trend_switch.value),
+                    cnv_gui_cutoff=cnv_cutoff_setting(cutoff_select.value),
+                    cnv_gui_chrom_axis=cnv_chrom_axis_setting(chrom_axis_select.value),
+                    cnv_gui_genome_axis=cnv_genome_axis_setting(
+                        genome_axis_select.value
+                    ),
+                    cnv_gui_gene_label_size=cnv_gene_label_size_setting(
+                        gene_label_select.value
+                    ),
+                    cnv_gui_label_orientation=(
+                        "rotated" if bool(orientation_switch.value) else "horizontal"
+                    ),
                 )
                 launcher.save_plotting_preferences(
                     updated,

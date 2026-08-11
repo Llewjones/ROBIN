@@ -1,0 +1,102 @@
+{
+  "BCOR": {
+    "chrom": "chrX",
+    "end": 40052419,
+    "label": "ITD",
+    "min_frequency": 0.05,
+    "min_length": 6,
+    "min_supporting_reads": 2,
+    "start": 40051230,
+    "transcript": "ENST00000378444.9"
+  },
+  "CALR": {
+    "chrom": "chr19",
+    "end": 12944508,
+    "label": "insertion",
+    "min_frequency": 0.05,
+    "min_length": 3,
+    "min_supporting_reads": 2,
+    "start": 12943692,
+    "transcript": "ENST00000316448.10"
+  },
+  "CEBPA": {
+    "chrom": "chr19",
+    "end": 33302553,
+    "label": "insertion",
+    "min_frequency": 0.05,
+    "min_length": 3,
+    "min_supporting_reads": 3,
+    "start": 33299913,
+    "transcript": "ENST00000498907.3"
+  },
+  "EGFR": {
+    "chrom": "chr7",
+    "end": 55181497,
+    "label": "insertion",
+    "min_frequency": 0.05,
+    "min_length": 3,
+    "min_supporting_reads": 2,
+    "start": 55181272,
+    "transcript": "ENST00000275493.7"
+  },
+  "ERBB2": {
+    "chrom": "chr17",
+    "end": 39724930,
+    "label": "insertion",
+    "min_frequency": 0.05,
+    "min_length": 3,
+    "min_supporting_reads": 2,
+    "start": 39724705,
+    "transcript": "ENST00000269571.10"
+  },
+  "FLT3": {
+    "chrom": "chr13",
+    "end": 28034233,
+    "label": "ITD",
+    "min_frequency": 0.01,
+    "min_length": 6,
+    "min_supporting_reads": 2,
+    "start": 28033866,
+    "transcript": "ENST00000241453.12"
+  },
+  "JAK2": {
+    "chrom": "chr9",
+    "end": 5070071,
+    "label": "insertion",
+    "min_frequency": 0.05,
+    "min_length": 3,
+    "min_supporting_reads": 2,
+    "start": 5069904,
+    "transcript": "ENST00000381652.4"
+  },
+  "KIT": {
+    "chrom": "chr4",
+    "end": 54727561,
+    "label": "ITD",
+    "min_frequency": 0.05,
+    "min_length": 3,
+    "min_supporting_reads": 2,
+    "start": 54727395,
+    "transcript": "ENST00000288135.6"
+  },
+  "NOTCH1": {
+    "chrom": "chr9",
+    "end": 136497577,
+    "label": "insertion",
+    "min_frequency": 0.05,
+    "min_length": 3,
+    "min_supporting_reads": 3,
+    "start": 136494412,
+    "transcript": "ENST00000651671.1"
+  },
+  "NPM1": {
+    "chrom": "chr5",
+    "end": 171410919,
+    "label": "insertion",
+    "min_frequency": 0.02,
+    "min_length": 3,
+    "min_supporting_reads": 2,
+    "start": 171410506,
+    "transcript": "ENST00000296930.10"
+  }
+}

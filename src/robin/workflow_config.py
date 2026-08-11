@@ -18,6 +18,30 @@ WORKFLOW_REQUIRED_KEYS = ("path", "workflow", "center", "target_panel")
 DEFAULT_CNV_PENALTY_VALUE = 10
 # Minimum adjacent same-sign bins for a gain/loss region (|CNV| > 0.5).
 DEFAULT_CNV_MIN_CONTIGUOUS_BINS = 1
+# Panel genes that are current clinical trial targets. Highlighted distinctly on
+# CNV figures in PDF reports so a reporting scientist can see at a glance which
+# altered genes have a trial route. Override per site with
+# ``[cnv].clinical_trial_genes``; set it to an empty list to disable.
+DEFAULT_CNV_CLINICAL_TRIAL_GENES: tuple[str, ...] = (
+    "ERBB2",
+    "MET",
+    "BRCA1",
+    "BRCA2",
+    "MLH1",
+    "MSH2",
+    "PALB2",
+    "RAD51C",
+    "RAD51D",
+    "CDK12",
+    "FGFR1",
+    "FGFR2",
+    "FGFR3",
+    "MTAP",
+)
+
+# Smallest analysis bin width (bp) that may be forced via [cnv].bin_width. Below
+# this, per-bin counts are too sparse at live-run coverage to be worth plotting.
+MIN_CNV_ANALYSIS_BIN_WIDTH = 50_000
 
 _logger = logging.getLogger("robin.workflow_config")
 
@@ -77,10 +101,15 @@ reference = "~/references/GCA_000001405.15_GRCh38_no_alt_analysis_set.fna"
 # panel_min_supporting_reads = 3
 
 # Optional CNV settings. Defaults: penalty_value=10, min_contiguous_bins=1.
+# bin_width fixes the analysis bin size in bp instead of letting cnv_from_bam pick
+# one from read depth; smaller bins give a higher-resolution genome-wide profile at
+# the cost of more CPU per update and noisier individual bins.
 # [cnv]
 # penalty_value = 10
 # min_contiguous_bins = 3
+# bin_width = 500000
 # genes = ["EGFR", "CDKN2A", "MYCN"]
+# clinical_trial_genes = ["ERBB2", "MET"]   # highlighted in PDF reports
 """
 
 
@@ -206,6 +235,28 @@ def parse_cnv_min_contiguous_bins(
         default=default,
         setting_name="min_contiguous_bins",
     )
+
+
+def parse_cnv_bin_width(value: Any) -> Optional[int]:
+    """Coerce a forced CNV analysis bin width in bp, or None to stay dynamic."""
+    if value is None:
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        _logger.warning(
+            "Invalid [cnv] bin_width %r; falling back to dynamic bin width", value
+        )
+        return None
+    if parsed < MIN_CNV_ANALYSIS_BIN_WIDTH:
+        _logger.warning(
+            "[cnv] bin_width %s is below the %s bp minimum; using %s bp",
+            parsed,
+            MIN_CNV_ANALYSIS_BIN_WIDTH,
+            MIN_CNV_ANALYSIS_BIN_WIDTH,
+        )
+        return MIN_CNV_ANALYSIS_BIN_WIDTH
+    return parsed
 
 
 def parse_cnv_genes(value: Any) -> tuple[str, ...]:
@@ -337,6 +388,117 @@ def get_cnv_min_contiguous_bins(
         cnv_section.get("min_contiguous_bins"),
         default=default,
     )
+
+
+def get_cnv_bin_width(
+    workflow_config: Optional[Mapping[str, Any]] = None,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+) -> Optional[int]:
+    """
+    Resolve a forced CNV analysis bin width in bp from workflow config.
+
+    Looks for::
+
+        [cnv]
+        bin_width = 500000
+
+    Returns None (the default) to let ``cnv_from_bam`` size bins from read depth.
+    Setting it smaller raises the resolution of every CNV plot, at the cost of
+    more work per live update and noisier per-bin values.
+    """
+    cnv_section = _load_cnv_section(workflow_config, environ=environ)
+    if cnv_section is None:
+        return None
+    return parse_cnv_bin_width(cnv_section.get("bin_width"))
+
+
+def get_cnv_clinical_trial_genes(
+    workflow_config: Optional[Mapping[str, Any]] = None,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+) -> tuple[str, ...]:
+    """Resolve clinical trial target genes from ``[cnv].clinical_trial_genes``.
+
+    Falls back to the packaged default list when the key is absent. An explicitly
+    empty list disables the highlighting.
+    """
+    cnv_section = _load_cnv_section(workflow_config, environ=environ)
+    if cnv_section is None or "clinical_trial_genes" not in cnv_section:
+        return DEFAULT_CNV_CLINICAL_TRIAL_GENES
+    return parse_cnv_genes(cnv_section.get("clinical_trial_genes"))
+
+
+#: Genes listed in the "NGTD and Clinical Trial Targets CNVs" report table.
+#: A ``/`` joins overlapping transcripts at one locus (for example
+#: ``CDKN2B/CDKN2B-AS1``): they share the same CNV bins, so they cannot be told
+#: apart at this resolution and are reported as a single row.
+#: Every gene here appears in that table whether or not it carries an event, so
+#: a reporting scientist can see at a glance that a target was looked at.
+#: Overridable per site with ``ngtd_genes`` under ``[cnv]`` in the workflow TOML.
+DEFAULT_CNV_NGTD_GENES: tuple[str, ...] = (
+    "ALK",
+    "ATRX",
+    "BCOR",
+    "BRCA1",
+    "BRCA2",
+    "CDK12",
+    "CDK4",
+    "CDKN2A",
+    "CDKN2B/CDKN2B-AS1",
+    "DDIT3",
+    "DDX3X",
+    "DICER1",
+    "EGFR",
+    "ERBB2",
+    "FGFR1",
+    "FGFR2",
+    "FGFR3",
+    "KIAA1549",
+    "KIT",
+    "MDM2",
+    "MET",
+    "MLH1",
+    "MSH2",
+    "MSH6",
+    "MTAP",
+    "MYB/MYB-AS1",
+    "MYCN/MYCNOS",
+    "NF1",
+    "NF2",
+    "PALB2",
+    "PDGFRA",
+    "PTCH1",
+    "PTEN",
+    "RAD51C",
+    "RAD51D",
+    "RB1",
+    "RREB1",
+    "SMARCA4",
+    "SMARCB1",
+    "SMO",
+    "TERT",
+    "TP53",
+    "WT1",
+    "YAP1",
+    "YWHAE",
+)
+
+
+def get_cnv_ngtd_genes(
+    workflow_config: Optional[Mapping[str, Any]] = None,
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+) -> tuple[str, ...]:
+    """Resolve the NGTD / clinical trial target list from ``[cnv].ngtd_genes``.
+
+    Falls back to the packaged default when the key is absent; an explicitly
+    empty list suppresses the table.
+    """
+    cnv_section = _load_cnv_section(workflow_config, environ=environ)
+    if cnv_section is None or "ngtd_genes" not in cnv_section:
+        return DEFAULT_CNV_NGTD_GENES
+    return parse_cnv_genes(cnv_section.get("ngtd_genes"))
 
 
 def get_cnv_genes(

@@ -280,6 +280,7 @@ def run_cnv_analysis_direct(
     threads=1,
     mapq_filter=60,
     sample_id: str = None,
+    bin_width: Optional[int] = None,
 ):
     """
     Run CNV analysis directly using cnv_from_bam without subprocess isolation.
@@ -293,6 +294,8 @@ def run_cnv_analysis_direct(
         threads: Number of threads to use
         mapq_filter: Mapping quality filter
         sample_id: Sample identifier
+        bin_width: Force this analysis bin width in bp ([cnv].bin_width). When
+            None, cnv_from_bam sizes bins from read depth.
 
     Returns:
         Dictionary with analysis results or None if failed
@@ -314,12 +317,18 @@ def run_cnv_analysis_direct(
         # First pass: process sample with accumulated copy numbers
         logger.debug(f"Starting Pass 1: Sample CNV extraction with {threads} threads")
         pass1_start = time.time()
+        pass1_kwargs = {}
+        if bin_width:
+            # A fixed bin width keeps plot resolution constant as depth grows,
+            # instead of cnv_from_bam widening bins as reads accumulate.
+            pass1_kwargs["bin_width"] = int(bin_width)
         result = cnv_from_bam.iterate_bam_file(
             bam_path,
             _threads=threads,
             mapq_filter=mapq_filter,
             copy_numbers=copy_numbers,
             log_level=int(logging.ERROR),
+            **pass1_kwargs,
         )
         pass1_time = time.time() - pass1_start
         logger.info(f"Pass 1 completed in {pass1_time:.2f}s (bin_width: {result.bin_width}, variance: {result.variance:.6f})")
@@ -379,6 +388,7 @@ def run_cnv_analysis_subprocess(
     sample_id: str = None,
     copy_numbers_path: str = None,
     timeout: int = 3600,
+    bin_width: Optional[int] = None,
 ):
     """
     Run CNV analysis using cnv_from_bam in a subprocess to avoid signal handling issues.
@@ -433,6 +443,8 @@ def run_cnv_analysis_subprocess(
         "--mapq-filter",
         str(mapq_filter),
     ]
+    if bin_width:
+        cmd.extend(["--bin-width", str(int(bin_width))])
     
     # Use per-sample copy_numbers file if provided (OPTIMIZED APPROACH)
     if copy_numbers_path:
@@ -679,14 +691,82 @@ def expected_cnv_ploidy_baseline(
     return 2.0
 
 
+#: Largest baseline correction that may be applied automatically. A genome whose
+#: apparent diploid level is further out than this is more likely to be badly
+#: aneuploid — where the most common level is genuinely not the diploid one —
+#: than merely off-centre, and silently shifting it could subtract a real event.
+CNV_MAX_BASELINE_SHIFT = 0.35
+
+#: How far the modal peak must stand above the average occupancy of the histogram
+#: before it is trusted as the diploid level. A genome with a real dominant level
+#: gives a peak 5-8x the mean bin; a genome with no dominant level gives a flat
+#: histogram with a ratio near 1, and should not drive a correction. A fraction of
+#: the total cannot be used here: peak height falls as the sample gets noisier,
+#: so a fixed fraction would silently stop correcting the noisiest samples.
+CNV_BASELINE_MIN_PEAK_RATIO = 3.0
+
+
+def estimate_cnv_baseline_shift(
+    log2_ratios: Dict[str, np.ndarray],
+) -> float:
+    """Offset between the modal (diploid) level and zero, in log2.
+
+    Ploidy is scaled so the genome-wide *mean* is 2, which is only the diploid
+    level on a balanced genome. On a genome with net loss the mean sits below the
+    diploid peak, so every unchanged region floats upward. In testing this ran
+    consistently positive, and grew with how aneuploid the genome was. Against a
+    0.3 cut-off that is a standing bias toward gain calls and away from loss
+    calls.
+
+    The mode is used rather than the mean or median because it is the level most
+    of the genome actually sits at, which is what "diploid" means, and it is
+    unmoved by a few large aberrant chromosomes. Autosomes only: chrX and chrY
+    depend on sex and would drag the estimate.
+
+    Returns 0.0 when the genome gives no trustworthy peak, so an uncertain
+    estimate leaves the track untouched rather than guessing.
+    """
+    pooled = [
+        np.asarray(values, dtype=float)
+        for chrom, values in log2_ratios.items()
+        if str(chrom).startswith("chr") and str(chrom)[3:].isdigit()
+    ]
+    if not pooled:
+        return 0.0
+    allv = np.concatenate(pooled)
+    allv = allv[np.isfinite(allv)]
+    # Ignore the deep tails: homozygous deletions and high amplification say
+    # nothing about where the bulk of the genome sits.
+    allv = allv[np.abs(allv) < 1.5]
+    if allv.size < 1000:
+        return 0.0
+    # Fixed range and bin count, so the resolution is 0.01 log2 on every sample
+    # rather than varying with the spread of the data.
+    hist, edges = np.histogram(allv, bins=300, range=(-1.5, 1.5))
+    peak = int(np.argmax(hist))
+    mean_occupancy = hist.mean()
+    if mean_occupancy <= 0 or hist[peak] < CNV_BASELINE_MIN_PEAK_RATIO * mean_occupancy:
+        return 0.0
+    shift = float((edges[peak] + edges[peak + 1]) / 2.0)
+    if not np.isfinite(shift) or abs(shift) > CNV_MAX_BASELINE_SHIFT:
+        return 0.0
+    return shift
+
+
 def compute_cnv_log2_from_ploidy(
     cnv_map: Dict[str, np.ndarray],
     sex_estimate: Optional[str] = None,
+    *,
+    centre_baseline: bool = True,
 ) -> Dict[str, np.ndarray]:
     """log2(observed ploidy / expected copy number) per bin.
 
     Matches the interpretation of the GUI ploidy scatter plot: a region at
     3 copies on an autosome (expected 2) yields log2(3/2) ≈ 0.585.
+
+    The track is then centred so that the modal level reads zero — see
+    ``estimate_cnv_baseline_shift``. Pass ``centre_baseline=False`` for the raw
+    ratio.
     """
     log2_ratios: Dict[str, np.ndarray] = {}
     for chrom, values in cnv_map.items():
@@ -702,6 +782,10 @@ def compute_cnv_log2_from_ploidy(
                 where=vals > 0,
             )
             log2_ratios[chrom] = np.log2(ratio)
+    if centre_baseline:
+        shift = estimate_cnv_baseline_shift(log2_ratios)
+        if shift:
+            log2_ratios = {c: v - shift for c, v in log2_ratios.items()}
     return log2_ratios
 
 
@@ -774,7 +858,60 @@ def prepare_cnv_calling_track(
     return coarsen_cnv_track(log2_track, analysis_bin_width, calling_bw), calling_bw
 
 
-CNV_REPORT_GENOME_PLOT_BIN_WIDTH = 1_000_000
+#: Upper bound on the display bin width for the genome-wide CNV summary when the
+#: caller does not set one. Each displayed point is the mean of the analysis bins
+#: inside it, so this width decides how much the scatter is smoothed — averaging
+#: N bins cuts the noise spread by sqrt(N).
+#:
+#: Panel gene markers are always taken from the *raw* analysis bins, so that a
+#: focal amplification is never averaged away. That makes this width the gap
+#: between a gene marker and the cloud it is drawn against: at 1 Mb over 50 kb
+#: analysis bins the cloud was smoothed 20x (spread cut 4.5x) while markers were
+#: not, so every panel gene sat above a cloud that could not reach it.
+#:
+#: This is a readability ceiling only. It cannot be the whole rule, because the
+#: analysis bin width is sized from read depth and is not knowable in advance —
+#: across eight archived samples it ranged from 7 kb to 1.15 Mb, a 160-fold
+#: spread. A single absolute width therefore means wildly different amounts of
+#: smoothing per run: 400 kb over a 7 kb track averages 57 bins, while over a
+#: 431 kb track it does nothing at all. ``CNV_REPORT_GENOME_PLOT_MAX_SMOOTHING``
+#: is what actually holds the cloud near its markers.
+CNV_REPORT_GENOME_PLOT_BIN_WIDTH = 400_000
+
+#: Most analysis bins that may be averaged into one displayed point.
+#:
+#: Measured on 384 panel gene markers across eight archived samples, as the
+#: fraction of the marker's own value that the cloud beside it still reaches:
+#:
+#:     bins averaged      1      2      4      8     16     36
+#:     cloud reaches   1.00   0.95   0.92   0.79   0.68   0.65
+#:
+#: 4 is the knee. Going to 2 buys 0.03 for twice the points; going to 8 costs
+#: 0.13. The earlier fixed 400 kb was tuned on a synthetic 50 kb track (8 bins,
+#: reach 0.95), but that track's "focal event" spanned half a display bin —
+#: broader than real focal events, which is why it looked cheaper than it is.
+#:
+#: The cost of holding this low is mild: on an 11 kb track it takes the summary
+#: from 7,700 points to 70,000, which renders in 2.1 s instead of 1.2 s and adds
+#: about 0.9 MB to the PDF.
+CNV_REPORT_GENOME_PLOT_MAX_SMOOTHING = 4
+
+
+def resolve_cnv_report_genome_plot_bin_width(
+    analysis_bin_width: int,
+    max_smoothing: int = CNV_REPORT_GENOME_PLOT_MAX_SMOOTHING,
+    ceiling: int = CNV_REPORT_GENOME_PLOT_BIN_WIDTH,
+) -> int:
+    """Default display bin width for the genome-wide summary.
+
+    Coarse enough to stay readable, but never averaging away so many analysis
+    bins that the cloud can no longer reach the panel gene markers drawn over
+    it. Returns the analysis width itself when that is already coarser than the
+    ceiling, so a shallow run is never smoothed further.
+    """
+    analysis_bw = max(int(analysis_bin_width), 1)
+    smoothed = analysis_bw * max(int(max_smoothing), 1)
+    return max(analysis_bw, min(int(ceiling), smoothed))
 
 
 def resolve_cnv_plot_bin_width(
@@ -1616,6 +1753,15 @@ def process_single_bam(
         )
         ref_cnv_dict_loaded = get_cached_ref_cnv_dict(ref_cnv_path, logger)
 
+        # Optional forced analysis bin width ([cnv].bin_width); None keeps
+        # cnv_from_bam's depth-driven sizing.
+        try:
+            from robin.workflow_config import get_cnv_bin_width
+
+            forced_bin_width = get_cnv_bin_width()
+        except Exception:
+            forced_bin_width = None
+
         # Process BAM file with cnv_from_bam using configurable execution mode
         execution_mode = "subprocess" if USE_CNV_SUBPROCESS else "direct"
         logger.debug(f"Processing BAM file with cnv_from_bam ({execution_mode}, {threads} threads)")
@@ -1635,6 +1781,7 @@ def process_single_bam(
                     sample_id=sample_id,
                     copy_numbers_path=copy_numbers_path,  # PER-SAMPLE FILE (OPTIMIZED)
                     timeout=adaptive_timeout,  # Adaptive timeout based on file size
+                    bin_width=forced_bin_width,
                 )
             else:
                 # Use direct execution (OPTIMIZED: pass data directly, no file I/O)
@@ -1646,6 +1793,7 @@ def process_single_bam(
                     threads=threads,  # Use configurable threads parameter
                     mapq_filter=60,
                     sample_id=sample_id,
+                    bin_width=forced_bin_width,
                 )
 
             if subprocess_result is None or not subprocess_result.get("success", False):
@@ -1949,6 +2097,15 @@ def process_multiple_bams(
         ref_cnv_dict_loaded = get_cached_ref_cnv_dict(ref_cnv_path, logger)
 
         # Process all BAM files with cnv_from_bam using configurable execution mode
+        # Optional forced analysis bin width ([cnv].bin_width); None keeps
+        # cnv_from_bam's depth-driven sizing.
+        try:
+            from robin.workflow_config import get_cnv_bin_width
+
+            forced_bin_width = get_cnv_bin_width()
+        except Exception:
+            forced_bin_width = None
+
         execution_mode = "subprocess" if USE_CNV_SUBPROCESS else "direct"
         logger.debug(f"Processing {len(valid_bam_paths)} BAM files with cnv_from_bam ({execution_mode}, {threads} threads)")
         
@@ -1987,6 +2144,7 @@ def process_multiple_bams(
                         sample_id=sample_id,
                         copy_numbers_path=copy_numbers_path,  # PER-SAMPLE FILE (OPTIMIZED)
                         timeout=adaptive_timeout,  # Adaptive timeout based on file size
+                        bin_width=forced_bin_width,
                     )
                 else:
                     # Use direct execution (OPTIMIZED: pass data directly, no file I/O)
@@ -1998,6 +2156,7 @@ def process_multiple_bams(
                         threads=threads,
                         mapq_filter=60,
                         sample_id=sample_id,
+                        bin_width=forced_bin_width,
                     )
 
                 if subprocess_result is None or not subprocess_result.get("success", False):

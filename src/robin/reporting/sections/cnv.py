@@ -14,7 +14,16 @@ import numpy as np
 import pandas as pd
 import natsort
 from reportlab.lib.units import inch
-from reportlab.platypus import PageBreak, Paragraph, Image, Spacer, Table, TableStyle
+from reportlab.platypus import (
+    Image,
+    NextPageTemplate,
+    PageBreak,
+    Paragraph,
+    Spacer,
+    Table,
+    TableStyle,
+)
+from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
 from ..sections.base import ReportSection
 from ..plotting import (
@@ -31,8 +40,80 @@ from ..plotting import (
 #    CNVAnalysis
 # )
 
+#: Width:height of the genome-wide CNV summary on its A4 landscape page.
+#: A deep panel makes a genome profile look stretched, since the data sits in a
+#: narrow band with empty axis above and below it.
+GENOME_SUMMARY_ASPECT = 3.2
+
+#: Purple used for the clinical-trial legend, matching the marker colour on
+#: the figures so the note and the genes it describes read as one thing.
+CNV_REPORT_TRIAL_LEGEND_COLOR = "#7E22CE"
+
+
+def _image_aspect(img_buf, fallback_ratio: float) -> float:
+    """Height/width of a rendered figure, so it can be placed without stretching."""
+    try:
+        from reportlab.lib.utils import ImageReader
+
+        img_buf.seek(0)
+        width_px, height_px = ImageReader(img_buf).getSize()
+        img_buf.seek(0)
+        if width_px:
+            return float(height_px) / float(width_px)
+    except Exception:
+        logger.debug("Could not measure figure aspect", exc_info=True)
+    return 1.0 / float(fallback_ratio)
+
+
+def _clinical_trial_genes(report) -> tuple:
+    """Clinical trial target genes for this run, from workflow config."""
+    try:
+        from robin.workflow_config import get_cnv_clinical_trial_genes
+
+        return tuple(get_cnv_clinical_trial_genes())
+    except Exception:
+        logger.debug("Could not resolve clinical trial genes", exc_info=True)
+        return ()
+
+
+def _report_cutoff_override(report) -> "float | None":
+    """Review cut-off set in the admin panel, or None to use the calling thresholds.
+
+    The same value drives the drawn lines, the point colouring, the CNV load and
+    the figure caption, so a report cannot show a cut-off it did not draw at.
+    """
+    return getattr(report, "cnv_cutoff", None)
+
+
+def _cutoff_text(report) -> str:
+    """Bare cut-off label, for prose rather than a heading."""
+    from robin.gui.plotting_preferences import cnv_cutoff_label
+
+    return cnv_cutoff_label(_report_cutoff_override(report))
+
+
+def _cutoff_suffix(report) -> str:
+    """Cut-off note for a table heading whose contents move with the cut-off."""
+    from robin.gui.plotting_preferences import cnv_cutoff_heading_suffix
+
+    return cnv_cutoff_heading_suffix(_report_cutoff_override(report))
+
+
+def _gene_label_size_kwargs(report) -> dict:
+    """Gene label styling from admin plotting preferences, when configured."""
+    kwargs = {}
+    size = getattr(report, "cnv_gene_label_size", None)
+    if size:
+        kwargs["gene_label_size"] = size
+    rotated = getattr(report, "cnv_gene_labels_rotated", None)
+    if rotated is not None:
+        kwargs["gene_labels_rotated"] = bool(rotated)
+    return kwargs
+
+
 from robin.analysis.cnv_analysis import (
     Result,
+    estimate_cnv_baseline_shift,
     moving_average,
     CNV_Difference,
     compute_cnv_log2_from_ploidy,
@@ -41,8 +122,15 @@ from robin.analysis.cnv_analysis import (
 )
 from robin.analysis.cnv_classification import detect_cnv_events, get_cnv_summary, CNVEvent
 from robin.analysis.cnv_regional import (
+    CNV_GENE_NO_DATA_LABEL,
+    CNV_GENE_UNKNOWN_LABEL,
+    CNV_GENE_NOT_LOCATED_LABEL,
+    CNV_LOAD_TITLE,
+    CNV_NO_EVENT_LABEL,
+    compute_target_gene_cnv_states,
     SIGNIFICANT_CNV_STATES,
     analyze_cytoband_cnv,
+    compute_cnv_load,
     build_regional_cnv_events,
     build_significant_regions,
     format_chromosome_cnv_status,
@@ -53,7 +141,10 @@ from robin.analysis.cnv_regional import (
     panel_genes_in_region,
 )
 from robin.reference_contigs import is_visible_contig
-from robin.classification_config import get_cnv_thresholds, is_resolution_sufficient
+from robin.classification_config import (
+    is_resolution_sufficient,
+    resolve_cnv_thresholds,
+)
 from robin.workflow_config import get_cnv_genes, load_workflow_toml
 
 from robin import resources
@@ -174,6 +265,144 @@ class CNVSection(ReportSection):
             frame_padding_pt=CNV_REPORT_FRAME_PADDING_PT,
         )
 
+    NGTD_TABLE_TITLE = "NGTD and Clinical Trial Targets CNVs"
+
+    def _append_ngtd_target_table(
+        self, log2_cnv, bin_width: int, sex_estimate: str, panel_genes_df
+    ) -> None:
+        """Every NGTD / clinical trial target and its CNV state, event or not.
+
+        Targets with nothing on them are listed too, so the table reads as
+        "these were looked at" rather than leaving the reader to infer it from
+        an absence.
+        """
+        try:
+            from robin.workflow_config import get_cnv_ngtd_genes
+
+            genes = tuple(get_cnv_ngtd_genes())
+        except Exception:
+            logger.debug("Could not resolve NGTD target genes", exc_info=True)
+            return
+        if not genes:
+            return
+        try:
+            # Panel first (what was actually targeted), then the genome-wide
+            # reference so an off-panel target can still be placed and named as
+            # off-panel rather than as unlocatable.
+            from robin.analysis.cnv_regional import load_gene_bed
+
+            frames = [
+                f
+                for f in (panel_genes_df, load_gene_bed())
+                if f is not None and not f.empty
+            ]
+            rows = compute_target_gene_cnv_states(
+                log2_cnv,
+                int(bin_width),
+                genes,
+                sex_estimate,
+                gene_frames=frames or None,
+                cutoff_override=_report_cutoff_override(self.report),
+            )
+        except Exception:
+            logger.debug("Could not resolve NGTD target CNV states", exc_info=True)
+            return
+        if not rows:
+            return
+
+        title_style = ParagraphStyle(
+            "CNVTableTitle",
+            parent=self.styles.styles["Normal"],
+            fontSize=9,
+            fontName="Helvetica-Bold",
+            spaceAfter=4,
+        )
+        self.elements.append(
+            Paragraph(
+                self.NGTD_TABLE_TITLE + _cutoff_suffix(self.report), title_style
+            )
+        )
+        self.elements.append(Spacer(1, 2))
+        table_rows = [["Gene", "Chr", "Log2 ratio", "Result"]]
+        for row in rows:
+            table_rows.append(
+                [
+                    row["gene"],
+                    row["chrom"] or "--",
+                    f"{row['value']:+.2f}" if row["value"] is not None else "--",
+                    row["state"],
+                ]
+            )
+        self.elements.append(
+            self.create_table(table_rows, auto_col_width=True, compact=True)
+        )
+        self.elements.append(Spacer(1, 4))
+        self.elements.append(
+            Paragraph(
+                f"Every configured target is listed. &quot;{CNV_NO_EVENT_LABEL}&quot; means the "
+                f"gene was assessed and no gain or loss crossed the calling cut-off. "
+                f"&quot;{CNV_GENE_NOT_LOCATED_LABEL}&quot; means it is not a target on this "
+                f"sample's panel and so was not assessed \u2014 that is not the same as no change. "
+                f"The value shown is the most extreme bin overlapping the gene, matching the "
+                f"gene markers on the plots.",
+                ParagraphStyle(
+                    "NGTDNote",
+                    parent=self.styles.styles["Normal"],
+                    fontSize=7,
+                    textColor=colors.HexColor("#475569"),
+                    spaceAfter=6,
+                ),
+            )
+        )
+
+    def _append_cnv_load_block(self) -> None:
+        """CNV load as its own titled block in the detailed analysis section.
+
+        Counted at the cut-off in force, so it agrees with the lines on the
+        figures and with the event tables beneath it, and labelled with that
+        cut-off the same way they are.
+        """
+        load = getattr(self, "cnv_load", None)
+        if not load or not load.get("assessed_mb"):
+            return
+        title_style = ParagraphStyle(
+            "CNVTableTitle",
+            parent=self.styles.styles["Normal"],
+            fontSize=9,
+            fontName="Helvetica-Bold",
+            spaceAfter=4,
+        )
+        heading = CNV_LOAD_TITLE + _cutoff_suffix(self.report)
+        self.elements.append(Paragraph(heading, title_style))
+        self.elements.append(Spacer(1, 2))
+        rows = [["", "Genome affected", "Span"]]
+        for label, pct_key, mb_key in (
+            ("Total", "total_percent", "total_mb"),
+            ("Gain", "gain_percent", "gain_mb"),
+            ("Loss", "loss_percent", "loss_mb"),
+        ):
+            rows.append(
+                [label, f"{load[pct_key]:.1f}%", f"{load[mb_key]:,.0f} Mb"]
+            )
+        rows.append(["Assessed", "", f"{load['assessed_mb']:,.0f} Mb"])
+        self.elements.append(self.create_table(rows, auto_col_width=True, compact=True))
+        self.elements.append(Spacer(1, 4))
+        self.elements.append(
+            Paragraph(
+                "CNV load is the proportion of the assessed genome whose log2 ratio "
+                "crosses the configured calling thresholds — the same cut-off drawn "
+                "on the plots. Bins without data are excluded from both the "
+                "proportion and the assessed span.",
+                ParagraphStyle(
+                    "CNVLoadNote",
+                    parent=self.styles.styles["Normal"],
+                    fontSize=7,
+                    textColor=colors.HexColor("#475569"),
+                    spaceAfter=6,
+                ),
+            )
+        )
+
     def add_content(self):
         """Add the CNV analysis content to the report."""
         logger.debug("Starting CNV section processing")
@@ -272,11 +501,23 @@ class CNVSection(ReportSection):
             use_normalized_summary = getattr(
                 self.report, "cnv_summary_normalized", False
             )
-            log2_cnv = (
-                compute_cnv_log2_from_ploidy(CNVresult.cnv, XYestimate)
-                if use_normalized_summary
-                else None
-            )
+            trial_genes = _clinical_trial_genes(self.report)
+            # Always computed, whatever scale the figures are drawn on. The
+            # regional table, CNV load, the NGTD table and the gene calls all
+            # work on this track, so tying it to the plotting preference left
+            # them silently absent whenever the report was set to ploidy.
+            log2_cnv = compute_cnv_log2_from_ploidy(CNVresult.cnv, XYestimate)
+            # Recorded so the figure can state it: a baseline correction that
+            # moves every value is not something a report should apply silently.
+            try:
+                baseline_shift = estimate_cnv_baseline_shift(
+                    compute_cnv_log2_from_ploidy(
+                        CNVresult.cnv, XYestimate, centre_baseline=False
+                    )
+                )
+            except Exception:
+                logger.debug("Could not resolve the CNV baseline shift", exc_info=True)
+                baseline_shift = 0.0
 
             # Initialize CNV_Difference object for normalized values
             result3 = CNV_Difference()
@@ -314,7 +555,9 @@ class CNVSection(ReportSection):
             # Add gain/loss thresholds to chromosome stats using centralized rules
             for chrom, stats in chromosome_stats.items():
                 if chrom != "global":
-                    gain_threshold, loss_threshold = get_cnv_thresholds(chrom, XYestimate)
+                    gain_threshold, loss_threshold = resolve_cnv_thresholds(
+                        chrom, XYestimate, _report_cutoff_override(self.report)
+                    )
                     stats["gain_threshold"] = gain_threshold
                     stats["loss_threshold"] = loss_threshold
 
@@ -375,7 +618,7 @@ class CNVSection(ReportSection):
             regional_cnv_events: list[dict] = []
             for chrom in reportable_chromosomes:
                 cytoband_analysis = analyze_cytoband_cnv(
-                    result3.cnv,
+                    log2_cnv,
                     chrom,
                     cnv_dict,
                     cytobands_bed,
@@ -384,6 +627,7 @@ class CNVSection(ReportSection):
                         columns=["chrom", "start_pos", "end_pos", "gene"]
                     ),
                     XYestimate,
+                    cutoff_override=_report_cutoff_override(self.report),
                 )
                 cytoband_analysis_by_chrom[chrom] = cytoband_analysis
                 regional_cnv_events.extend(
@@ -393,12 +637,12 @@ class CNVSection(ReportSection):
             # Calculate gene counts
             total_gained_genes = set()
             total_lost_genes = set()
-            for chrom in natsort.natsorted(result3.cnv.keys()):
+            for chrom in natsort.natsorted(log2_cnv.keys()):
                 if chrom != "chrM" and re.match(r"^chr(\d+|X|Y)$", chrom):
                     analysis = cytoband_analysis_by_chrom.get(chrom)
                     if analysis is None:
                         analysis = analyze_cytoband_cnv(
-                            result3.cnv,
+                            log2_cnv,
                             chrom,
                             cnv_dict,
                             cytobands_bed,
@@ -407,6 +651,7 @@ class CNVSection(ReportSection):
                                 columns=["chrom", "start_pos", "end_pos", "gene"]
                             ),
                             XYestimate,
+                            cutoff_override=_report_cutoff_override(self.report),
                         )
                     if not analysis.empty:
                         # Get genes in gained regions (including HIGH_GAIN)
@@ -424,6 +669,21 @@ class CNVSection(ReportSection):
                         for _, row in lost.iterrows():
                             if row["genes"]:
                                 total_lost_genes.update(row["genes"])
+
+            # CNV load gets its own block alongside the detailed events below.
+            try:
+                # Same cut-off the figures are drawn at, so the load agrees with
+                # the lines above it. compute_cnv_load reports which threshold it
+                # used, and that label is printed with the block.
+                self.cnv_load = compute_cnv_load(
+                    log2_cnv,
+                    int(cnv_dict["bin_width"]),
+                    str(XYestimate),
+                    cutoff_override=_report_cutoff_override(self.report),
+                )
+            except Exception:
+                logger.debug("Could not compute CNV load", exc_info=True)
+                self.cnv_load = None
 
             # Add gene counts to summary
             summary_data.append(
@@ -519,7 +779,8 @@ class CNVSection(ReportSection):
                     bin_width=calling_binw,
                     sex_estimate=XYestimate,
                     cytobands_df=cytobands_bed,
-                    gene_df=gene_bed
+                    gene_df=gene_bed,
+                    cutoff_override=_report_cutoff_override(self.report),
                 )
                 
                 # Convert events to summary format
@@ -562,7 +823,7 @@ class CNVSection(ReportSection):
             if summary_whole_chr_events:
                 self.summary_elements.append(
                     Paragraph(
-                        "Whole Chromosome Events:<br/> "
+                        f"Whole Chromosome Events{_cutoff_suffix(self.report)}:<br/> "
                         + " <br/> ".join(summary_whole_chr_events),
                         ParagraphStyle(
                             "SummaryText",
@@ -581,7 +842,8 @@ class CNVSection(ReportSection):
                 logger.debug(f"Found {len(summary_arm_events)} arm events to report")
                 self.summary_elements.append(
                     Paragraph(
-                        "Chromosome Arm Events (requires visual inspection):<br/> "
+                        f"Chromosome Arm Events{_cutoff_suffix(self.report)} "
+                        "(requires visual inspection):<br/> "
                         + " <br/> ".join(summary_arm_events),
                         ParagraphStyle(
                             "SummaryText",
@@ -610,6 +872,18 @@ class CNVSection(ReportSection):
             use_normalized_summary = getattr(
                 self.report, "cnv_summary_normalized", False
             )
+            trial_genes = _clinical_trial_genes(self.report)
+            # The genome-wide profile is a 4:1 figure with dozens of gene
+            # labels; on the portrait text column it has to be scaled to about
+            # half size, which is what made it look cluttered. Give it a
+            # landscape page and render it at roughly the size it is placed at.
+            landscape_width = getattr(
+                self.report.doc, "landscape_width", inch * 10.4
+            )
+            # Aspect chosen so the figure plus its caption fill the landscape
+            # frame: a taller panel also gives stacked gene labels more room.
+            genome_fig_width_inch = landscape_width / inch
+            genome_fig_height_inch = genome_fig_width_inch / GENOME_SUMMARY_ASPECT
             img_buf = create_CNV_plot(
                 CNVresult,
                 cnv_dict,
@@ -621,15 +895,38 @@ class CNVSection(ReportSection):
                 significant_regions=significant_regions,
                 reference_contig_scope=scope,
                 configured_genes=configured_genes,
+                clinical_trial_genes=trial_genes,
+                fig_width=genome_fig_width_inch,
+                fig_height=genome_fig_height_inch,
+                fixed_axis_log2=getattr(self.report, "cnv_genome_axis_log2", None),
+                cutoff_override=_report_cutoff_override(self.report),
+                **_gene_label_size_kwargs(self.report),
             )
             summary_caption_scale = (
                 "normalized_difference" if use_normalized_summary else "ploidy"
             )
-            width, height = inch * 7.5, inch * 2  # A4 width minus margins
-            self.summary_elements.append(Image(img_buf, width=width, height=height))
+            self.summary_elements.append(
+                NextPageTemplate(self.report.LANDSCAPE_TEMPLATE)
+            )
+            self.summary_elements.append(PageBreak())
+            # Place at the image's own aspect so it fills the width without
+            # being stretched (the previous fixed 7.5x2 in placement distorted
+            # a 4:1 figure by about 6%).
+            self.summary_elements.append(
+                Image(
+                    img_buf,
+                    width=landscape_width,
+                    height=landscape_width * _image_aspect(img_buf, GENOME_SUMMARY_ASPECT),
+                )
+            )
             self.summary_elements.append(
                 Paragraph(
-                    cnv_report_plot_caption(summary_caption_scale),
+                    cnv_report_plot_caption(
+                        summary_caption_scale,
+                        has_clinical_trial_genes=bool(trial_genes),
+                        cutoff_override=_report_cutoff_override(self.report),
+                        baseline_shift=baseline_shift,
+                    ),
                     ParagraphStyle(
                         "PlotCaption",
                         parent=self.styles.styles["Caption"],
@@ -642,6 +939,11 @@ class CNVSection(ReportSection):
                     ),
                 )
             )
+            # Everything after the genome-wide figure returns to portrait.
+            self.summary_elements.append(
+                NextPageTemplate(self.report.PORTRAIT_TEMPLATE)
+            )
+            self.summary_elements.append(PageBreak())
 
             # Create summary of CNV events using centralized detection
             logger.debug("Creating CNV summary using centralized events")
@@ -668,11 +970,17 @@ class CNVSection(ReportSection):
                         f"{event.proportion_affected:.1%}",
                     ])
 
+            # CNV load, immediately before the event tables it contextualises.
+            self._append_cnv_load_block()
+            self._append_ngtd_target_table(
+                log2_cnv, cnv_dict["bin_width"], str(XYestimate), panel_genes_df
+            )
+
             # Add whole chromosome events summary if any exist
             if whole_chr_events:
                 self.elements.append(
                     Paragraph(
-                        "Whole Chromosome Events",
+                        "Whole Chromosome Events" + _cutoff_suffix(self.report),
                         ParagraphStyle(
                             "CNVTableTitle",
                             parent=self.styles.styles["Normal"],
@@ -763,6 +1071,7 @@ class CNVSection(ReportSection):
                 regional_title = "Regional CNV Events"
                 if panel_name:
                     regional_title += f" ({panel_name} panel genes)"
+                regional_title += _cutoff_suffix(self.report)
                 regional_header = Paragraph(
                     regional_title,
                     ParagraphStyle(
@@ -798,7 +1107,7 @@ class CNVSection(ReportSection):
                     )
                 )
                 arm_header = Paragraph(
-                    "Arm Events (visual inspection)",
+                    "Arm Events (visual inspection)" + _cutoff_suffix(self.report),
                     ParagraphStyle(
                         "CNVTableTitle",
                         parent=self.styles.styles["Normal"],
@@ -919,6 +1228,21 @@ class CNVSection(ReportSection):
                     fig_height=chromosome_plot_height_inch,
                     fig_width=chromosome_plot_width_inch,
                     configured_genes=configured_genes,
+                    clinical_trial_genes=trial_genes,
+                    # The report shows each chromosome on its own full data
+                    # range: on a fixed window a deep deletion is clamped to the
+                    # axis edge, and a percentile fit clips it just the same. The
+                    # report is read one chromosome at a time, so true depth
+                    # matters more than comparability between them. The fixed
+                    # window remains on the live view and the Chromosome PDFs.
+                    fixed_axis_log2=None,
+                    full_range_axis=True,
+                    # Four plots to a page, so the purple legend is stated once
+                    # in the body text below instead of on every figure, where
+                    # it collided with the chromosome titles.
+                    figure_legend=False,
+                    cutoff_override=_report_cutoff_override(self.report),
+                    **_gene_label_size_kwargs(self.report),
                 )
                 plot_lookup = dict(chromosome_plots)
                 plotted_chromosomes = [
@@ -944,6 +1268,47 @@ class CNVSection(ReportSection):
                         and not last_on_page
                     ):
                         self.elements.append(Spacer(1, self.CHROMOSOME_PLOT_SPACER))
+
+                # The chromosome figures carry the same cut-off lines as the
+                # genome-wide panel, stated once under the block rather than on
+                # each of the four figures per page.
+                self.elements.append(Spacer(1, 4))
+                self.elements.append(
+                    Paragraph(
+                        f"Dashed amber lines = gain / loss cut-off "
+                        f"{_cutoff_text(self.report)}.",
+                        ParagraphStyle(
+                            "CNVChromCutoff",
+                            parent=self.styles.styles["Normal"],
+                            fontSize=7,
+                            textColor=colors.HexColor("#475569"),
+                            spaceAfter=2,
+                        ),
+                    )
+                )
+
+                # The purple convention, stated once under the block rather
+                # than on each of the four figures per page.
+                if trial_genes:
+                    from robin.gui.plotting_preferences import (
+                        CNV_CLINICAL_TRIAL_LEGEND,
+                    )
+
+                    self.elements.append(Spacer(1, 4))
+                    self.elements.append(
+                        Paragraph(
+                            CNV_CLINICAL_TRIAL_LEGEND,
+                            ParagraphStyle(
+                                "CNVTrialLegend",
+                                parent=self.styles.styles["Normal"],
+                                fontSize=7,
+                                textColor=colors.HexColor(
+                                    CNV_REPORT_TRIAL_LEGEND_COLOR
+                                ),
+                                spaceAfter=4,
+                            ),
+                        )
+                    )
 
                 # Combined event list for CSV export only (tables above already
                 # show whole-chromosome, regional, and arm events separately).
