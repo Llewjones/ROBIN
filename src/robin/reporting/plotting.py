@@ -544,21 +544,36 @@ def _normalise_coverage_to_cnv_axis(
     return float(scale_mean_cnv) * ratio
 
 
+def _panel_label_components(label: str) -> List[str]:
+    """The individual gene symbols making up a panel target label.
+
+    Panel BED names are composite where targets overlap: rCNS2 writes
+    ``CDKN2A,CDKN2B,CDKN2B-AS1`` and ``CASC11,MYC``, while the packaged NGTD
+    list uses slashes (``CDKN2B/CDKN2B-AS1``). Matching the whole string against
+    a configured symbol therefore fails for 57 of the 243 rCNS2 targets - among
+    them CDKN2A/B, NF1, ERBB2, MYCN and MLH1 - so each component is matched
+    separately.
+    """
+    parts = str(label).replace("/", ",").split(",")
+    return [part.strip().casefold() for part in parts if part.strip()]
+
+
 def _panel_label_matches_configured(label: str, configured_genes: Sequence[str]) -> bool:
     """True when a panel target label matches a configured ``[cnv].genes`` symbol."""
-    key = str(label).strip().casefold()
-    if not key:
+    components = _panel_label_components(label)
+    if not components:
         return False
     for gene in configured_genes:
         want = str(gene).strip().casefold()
         if not want:
             continue
-        if key == want:
-            return True
-        if key.startswith(f"{want}_") or key.startswith(f"{want}-") or key.startswith(
-            f"{want} "
-        ):
-            return True
+        for key in components:
+            if key == want:
+                return True
+            if key.startswith(f"{want}_") or key.startswith(f"{want}-") or key.startswith(
+                f"{want} "
+            ):
+                return True
     return False
 
 
