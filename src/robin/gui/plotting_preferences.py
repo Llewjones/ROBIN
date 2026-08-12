@@ -678,8 +678,8 @@ def cnv_report_genome_ylabel_mathtext(scale: str) -> str:
     return cnv_report_genome_ylabel(scale)
 
 
-CNV_CLINICAL_TRIAL_LEGEND = (
-    "Genes labelled in purple represent current clinical trial targets."
+CNV_STEP2_LEGEND = (
+    "Genes labelled in purple represent current Step 2 targets."
 )
 
 
@@ -771,5 +771,5 @@ def cnv_report_plot_caption(
             f"({baseline_shift:+.2f} log2 applied)."
         )
     if has_clinical_trial_genes:
-        caption += " " + CNV_CLINICAL_TRIAL_LEGEND
+        caption += " " + CNV_STEP2_LEGEND
     return caption

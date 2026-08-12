@@ -762,7 +762,7 @@ def test_report_caption_names_the_purple_convention() -> None:
     without = cnv_report_plot_caption("normalized_difference")
 
     assert "purple" in with_trials
-    assert "clinical trial" in with_trials
+    assert "Step 2" in with_trials
     assert "purple" not in without
     # Both state the swapped gain/loss convention.
     for caption in (with_trials, without):
@@ -797,7 +797,7 @@ def test_clinical_trial_legend_is_drawn_on_the_figure() -> None:
     try:
         assert _add_clinical_trial_legend(fig, [{"clinical_trial": True}]) is True
         texts = [t.get_text() for t in fig.texts]
-        assert any("clinical trial targets" in t for t in texts)
+        assert any("Step 2 targets" in t for t in texts)
     finally:
         plt.close(fig)
 
@@ -2274,3 +2274,18 @@ def test_full_range_axis_page_is_not_labelled_as_a_second_page() -> None:
     finally:
         for _contig, fig in figures:
             plt.close(fig)
+
+
+def test_step2_naming_replaces_clinical_trial_in_user_facing_text() -> None:
+    """The site renamed these targets to "Step 2" to avoid confusion with WGS trials.
+
+    Only the wording changed: the ``[cnv].clinical_trial_genes`` config key stays
+    as it is, so existing workflow settings keep working.
+    """
+    from robin.gui.plotting_preferences import CNV_STEP2_LEGEND
+    from robin.reporting.sections.cnv import CNVSection
+
+    assert "Step 2" in CNV_STEP2_LEGEND
+    assert "clinical trial" not in CNV_STEP2_LEGEND.casefold()
+    assert "Step 2" in CNVSection.NGTD_TABLE_TITLE
+    assert "clinical trial" not in CNVSection.NGTD_TABLE_TITLE.casefold()

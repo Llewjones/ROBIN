@@ -45,7 +45,7 @@ from ..plotting import (
 #: narrow band with empty axis above and below it.
 GENOME_SUMMARY_ASPECT = 3.2
 
-#: Purple used for the clinical-trial legend, matching the marker colour on
+#: Purple used for the Step 2 legend, matching the marker colour on
 #: the figures so the note and the genes it describes read as one thing.
 CNV_REPORT_TRIAL_LEGEND_COLOR = "#7E22CE"
 
@@ -66,7 +66,7 @@ def _image_aspect(img_buf, fallback_ratio: float) -> float:
 
 
 def _clinical_trial_genes(report) -> tuple:
-    """Clinical trial target genes for this run, from workflow config."""
+    """Step 2 target genes for this run, from workflow config."""
     try:
         from robin.workflow_config import get_cnv_clinical_trial_genes
 
@@ -265,12 +265,12 @@ class CNVSection(ReportSection):
             frame_padding_pt=CNV_REPORT_FRAME_PADDING_PT,
         )
 
-    NGTD_TABLE_TITLE = "NGTD and Clinical Trial Targets CNVs"
+    NGTD_TABLE_TITLE = "NGTD and Step 2 Targets CNVs"
 
     def _append_ngtd_target_table(
         self, log2_cnv, bin_width: int, sex_estimate: str, panel_genes_df
     ) -> None:
-        """Every NGTD / clinical trial target and its CNV state, event or not.
+        """Every NGTD / Step 2 target and its CNV state, event or not.
 
         Targets with nothing on them are listed too, so the table reads as
         "these were looked at" rather than leaving the reader to infer it from
@@ -1291,13 +1291,13 @@ class CNVSection(ReportSection):
                 # than on each of the four figures per page.
                 if trial_genes:
                     from robin.gui.plotting_preferences import (
-                        CNV_CLINICAL_TRIAL_LEGEND,
+                        CNV_STEP2_LEGEND,
                     )
 
                     self.elements.append(Spacer(1, 4))
                     self.elements.append(
                         Paragraph(
-                            CNV_CLINICAL_TRIAL_LEGEND,
+                            CNV_STEP2_LEGEND,
                             ParagraphStyle(
                                 "CNVTrialLegend",
                                 parent=self.styles.styles["Normal"],

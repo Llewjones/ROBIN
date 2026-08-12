@@ -67,7 +67,7 @@ CNV_COLORS = {
     "loss_edge": "#A94442",
     "gene": "#5C6BC0",
     # Report convention (PDF only; the live GUI keeps its own palette):
-    # gains blue, losses red, clinical trial targets purple whichever way they went.
+    # gains blue, losses red, Step 2 targets purple whichever way they went.
     "plot_gain": "#1D4ED8",
     "plot_loss": "#C81E1E",
     "plot_neutral": "#9CA3AF",
@@ -739,7 +739,7 @@ def _tag_clinical_trial_points(
     points: List[Dict[str, Any]],
     clinical_trial_genes: Sequence[str],
 ) -> List[Dict[str, Any]]:
-    """Mark panel points whose gene is a current clinical trial target."""
+    """Mark panel points whose gene is a current Step 2 target."""
     if not clinical_trial_genes:
         return points
     return [
@@ -1019,7 +1019,7 @@ def _add_panel_coverage_points(
 def _panel_point_color(point: Dict[str, Any]) -> str:
     """Colour for a panel gene marker and its label.
 
-    Clinical trial targets are purple whichever way they went, so a reporting
+    Step 2 targets are purple whichever way they went, so a reporting
     scientist can pick out the genes with a trial route at a glance; everything
     else follows the report's gain/loss convention.
     """
@@ -1295,13 +1295,13 @@ def _add_clinical_trial_legend(
     """
     if not any(point.get("clinical_trial") for point in coverage_points):
         return False
-    from robin.gui.plotting_preferences import CNV_CLINICAL_TRIAL_LEGEND
+    from robin.gui.plotting_preferences import CNV_STEP2_LEGEND
 
     at_top = str(corner) == "top"
     fig.text(
         0.995,
         0.995 if at_top else 0.005,
-        CNV_CLINICAL_TRIAL_LEGEND,
+        CNV_STEP2_LEGEND,
         ha="right",
         va="top" if at_top else "bottom",
         fontsize=CNV_FONT["annotation"],
@@ -2717,7 +2717,7 @@ def iter_CNV_chromosome_figures(
         full_range_axis: When True the chromosome's own page is drawn on the true
             data range rather than a percentile fit, so a deep event is shown at
             its real depth instead of being clipped to an edge marker.
-        figure_legend: When False the clinical-trial legend is not drawn on the
+        figure_legend: When False the Step 2 legend is not drawn on the
             figure. The report stacks four plots to a page and states it once in
             the body text instead, where it cannot collide with a title.
         full_range_pages: When True, a chromosome with bins outside the fixed

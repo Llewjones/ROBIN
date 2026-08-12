@@ -2631,7 +2631,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             pass
 
         ui.separator().classes("mgmt-detail-separator")
-        ngtd_label = ui.label("NGTD and clinical trial targets CNVs").classes(
+        ngtd_label = ui.label("NGTD and Step 2 targets CNVs").classes(
             "target-coverage-panel__meta-label mt-2 mb-1"
         )
         ngtd_summary = ui.label("Awaiting CNV data").classes(
@@ -3171,7 +3171,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         called = sum(1 for row in rows if row["state"] in ("GAIN", "LOSS"))
         _set_cutoff_heading(
             ngtd_label,
-            "NGTD and clinical trial targets CNVs",
+            "NGTD and Step 2 targets CNVs",
             _resolve_cnv_cutoff(state.get("cutoff")),
         )
         ngtd_summary.set_text(

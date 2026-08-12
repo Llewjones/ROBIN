@@ -1,12 +1,12 @@
 {
-  "file_date": "2026-06-21",
+  "file_date": "2026-08-08",
   "source": "ClinVar",
   "reference": "GRCh38",
   "url": "https://ftp.ncbi.nlm.nih.gov/pub/clinvar/vcf_GRCh38/clinvar.vcf.gz",
-  "local_path": "/Users/mattloose/GIT/robin_dev/ROBIN/src/robin/resources/clinvar.vcf.gz",
-  "file_size_bytes": 192272329,
-  "file_mtime_unix": 1782399474.5377133,
-  "recorded_at": "2026-06-25T15:38:21.310639+00:00",
-  "remote_last_modified_unix": 1782138156.0,
-  "remote_last_modified": "Mon, 22 Jun 2026 14:22:36 GMT"
+  "local_path": "/home/prom/ROBIN_fix-duplicate-bam-accumulation_robin_new_features/src/robin/resources/clinvar.vcf.gz",
+  "file_size_bytes": 193118277,
+  "file_mtime_unix": 1786540879.236672,
+  "recorded_at": "2026-08-12T13:21:25.918662+00:00",
+  "remote_last_modified_unix": 1786366835.0,
+  "remote_last_modified": "Mon, 10 Aug 2026 13:00:35 GMT"
 }
