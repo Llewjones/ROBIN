@@ -1172,6 +1172,7 @@ def _collect_chromosome_significant_panel_points(
         use_max_abs=use_log2,
         target_coverage_df=target_coverage_df,
         cutoff_override=cutoff_override,
+        configured_genes=configured_genes,
     )
     selected = _select_panel_coverage_points(
         panel_points,
@@ -1236,6 +1237,7 @@ def _collect_genome_significant_panel_points(
             use_max_abs=use_log2,
             target_coverage_df=target_coverage_df,
             cutoff_override=cutoff_override,
+            configured_genes=configured_genes,
         )
 
         chrom_offset = float(chrom_start_offsets.get(contig, 0.0))
@@ -2415,13 +2417,38 @@ def cnv_chromosome_fig_width_for_page(
     return page_width_inch - frame_padding_pt / 72.0
 
 
-def _panel_target_label(gene_row) -> str:
-    """Return the display label for a target-panel region."""
+def _panel_target_label(gene_row, configured_genes: Sequence[str] = ()) -> str:
+    """Return the display label for a target-panel region.
+
+    Panel names are composite where targets overlap, and naming the target after
+    its first component labels it for a bystander gene: MYC is drawn as CASC11,
+    NF1 as MIR4733HG, MLH1 as LRRFIP2, MSH2 as KCNK12. A reporting scientist
+    looking for the gene they configured does not find it.
+
+    When a component is one the site asked for in ``[cnv].genes``, that name is
+    used instead. Configured order breaks ties, so a target covering several
+    requested genes shows the first one listed.
+    """
     for key in ("gene", "name", "target"):
         if key in gene_row.index and pd.notna(gene_row[key]):
             raw = str(gene_row[key]).strip()
-            if raw and raw.lower() != "nan":
-                return raw.split(",")[0].strip()
+            if not raw or raw.lower() == "nan":
+                continue
+            parts = [
+                part.strip()
+                for part in raw.replace("/", ",").split(",")
+                if part.strip()
+            ]
+            if not parts:
+                continue
+            for gene in configured_genes:
+                want = str(gene).strip().casefold()
+                if not want:
+                    continue
+                for part in parts:
+                    if part.casefold() == want:
+                        return part
+            return parts[0]
     return ""
 
 
@@ -2478,6 +2505,7 @@ def _collect_panel_gene_points(
     use_max_abs: bool = False,
     target_coverage_df: Optional[pd.DataFrame] = None,
     cutoff_override: Optional[float] = None,
+    configured_genes: Sequence[str] = (),
 ) -> List[Dict[str, Any]]:
     """Collect panel target positions and a representative CNV per target."""
     if panel_genes_df is None or panel_genes_df.empty:
@@ -2488,7 +2516,7 @@ def _collect_panel_gene_points(
     points: List[Dict[str, Any]] = []
 
     for _, gene_row in genes.iterrows():
-        label_text = _panel_target_label(gene_row)
+        label_text = _panel_target_label(gene_row, configured_genes)
         if not label_text:
             continue
 

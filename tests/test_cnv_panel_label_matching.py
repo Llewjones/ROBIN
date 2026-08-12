@@ -98,3 +98,65 @@ def test_suffixed_symbols_still_match_by_prefix():
 def test_case_and_whitespace_insensitive():
     assert _panel_label_matches_configured(" casc11 , myc ", ["MYC"])
     assert _panel_label_matches_configured("CASC11,MYC", ["  myc  "])
+
+
+def _row(name):
+    import pandas as pd
+
+    return pd.Series({"gene": name})
+
+
+@pytest.mark.parametrize("label,configured,shown", [
+    ("CASC11,MYC", ["MYC"], "MYC"),
+    ("MIR4733HG,NF1", ["NF1"], "NF1"),
+    ("LRRFIP2,MLH1", ["MLH1"], "MLH1"),
+    ("KCNK12,MSH2", ["MSH2"], "MSH2"),
+    ("FBXO11,MSH6", ["MSH6"], "MSH6"),
+    ("MYB,MYB-AS1", ["MYB-AS1"], "MYB-AS1"),
+])
+def test_configured_gene_wins_the_display_name(label, configured, shown):
+    """Otherwise the marker is named for a bystander gene nobody asked for."""
+    from robin.reporting.plotting import _panel_target_label
+
+    assert _panel_target_label(_row(label), configured) == shown
+
+
+def test_unconfigured_targets_keep_the_first_component():
+    from robin.reporting.plotting import _panel_target_label
+
+    assert _panel_target_label(_row("EPS8L3,GSTM5"), ["MYC"]) == "EPS8L3"
+    assert _panel_target_label(_row("EPS8L3,GSTM5")) == "EPS8L3"
+
+
+def test_configured_order_breaks_ties():
+    """One interval, several requested genes: the first listed one is shown."""
+    from robin.reporting.plotting import _panel_target_label
+
+    label = "CDKN2A,CDKN2B,CDKN2B-AS1"
+    assert _panel_target_label(_row(label), ["CDKN2A", "CDKN2B"]) == "CDKN2A"
+    assert _panel_target_label(_row(label), ["CDKN2B", "CDKN2A"]) == "CDKN2B"
+
+
+def test_display_name_is_always_a_real_component():
+    """Never invent a name the panel does not carry."""
+    from robin.reporting.plotting import _panel_target_label
+
+    for label in _panel_labels():
+        shown = _panel_target_label(_row(label), ["MYC", "NF1", "CDKN2B", "EGFR"])
+        assert shown in [p.strip() for p in label.replace("/", ",").split(",")]
+
+
+def test_slash_labels_are_handled_too():
+    from robin.reporting.plotting import _panel_target_label
+
+    assert _panel_target_label(_row("CDKN2B/CDKN2B-AS1"), ["CDKN2B-AS1"]) == "CDKN2B-AS1"
+
+
+def test_missing_or_blank_names_are_tolerated():
+    import pandas as pd
+
+    from robin.reporting.plotting import _panel_target_label
+
+    assert _panel_target_label(pd.Series({"gene": ""}), ["MYC"]) == ""
+    assert _panel_target_label(pd.Series({"gene": "nan"}), ["MYC"]) == ""
+    assert _panel_target_label(pd.Series({"other": "MYC"}), ["MYC"]) == ""
