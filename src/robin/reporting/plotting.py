@@ -2643,6 +2643,7 @@ def iter_CNV_chromosome_figures(
     full_range_axis: bool = False,
     figure_legend: bool = True,
     clinical_trial_genes: Sequence[str] = (),
+    hide_unmappable_bands: bool = True,
 ):
     """Yields ``(chromosome, Figure)`` for each per-chromosome CNV plot.
 
@@ -2725,6 +2726,8 @@ def iter_CNV_chromosome_figures(
         total_height = fig_height or cnv_chromosome_fig_height_for_page(9.34)
         total_width = fig_width or CNV_CHROMOSOME_FIG_WIDTH
 
+        from robin.analysis.cnv_regional import unmappable_bin_mask
+
         for contig in chromosomes:
             if contig not in cnv_source:
                 continue
@@ -2743,6 +2746,19 @@ def iter_CNV_chromosome_figures(
             plot_mask = np.isfinite(plot_values)
             positions_mb = positions_mb[plot_mask]
             plot_values = plot_values[plot_mask]
+            if hide_unmappable_bands:
+                # Bins the control profile cannot cover are the divisor-is-zero
+                # bins: their log2 ratio explodes and they scatter to -3..-5,
+                # burying the real profile and stretching the full-range axis.
+                # Bins overlapping a panel target are never hidden. Dropped from
+                # the plot only - values_array, segmentation and the reported
+                # calls are untouched.
+                unmappable = unmappable_bin_mask(
+                    contig, positions_mb * 1_000_000.0, report_plot_bin_width
+                )
+                if unmappable.any():
+                    positions_mb = positions_mb[~unmappable]
+                    plot_values = plot_values[~unmappable]
             if len(plot_values) == 0:
                 continue
             # Axis-independent work, so a chromosome drawn twice does it once.

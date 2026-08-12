@@ -49,6 +49,9 @@ def test_build_cnv_track_scatter_series_filters_non_finite() -> None:
         plot_bin_width=1_000_000,
         chrom_palette=["#000"],
         filter_finite=True,
+        # This test is about non-finite filtering; keep the unmappable-bin
+        # mask out of it (chr1 0-1 Mb is telomeric and would be hidden).
+        hide_unmappable_bands=False,
     )
     assert len(series) == 1
     ys = [pt[1] for pt in series[0]["data"]]

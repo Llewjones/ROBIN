@@ -46,6 +46,7 @@ from robin.analysis.cnv_regional import (
     format_regional_event_table_row,
     is_reportable_chromosome,
     load_panel_gene_bed,
+    unmappable_bin_mask,
 )
 from robin.analysis.itd_work import load_gene_target_coverage
 from robin.classification_config import get_cnv_thresholds
@@ -1743,9 +1744,25 @@ def _build_cnv_track_scatter_series(
     plot_bin_width: int,
     chrom_palette: List[str],
     filter_finite: bool = False,
+    hide_unmappable_bands: bool = True,
 ) -> List[Dict[str, Any]]:
     """Build ECharts scatter series for a per-chromosome CNV track."""
     series: List[Dict[str, Any]] = []
+
+    def _drop_unmappable(contig: str, x_bp: np.ndarray, vals: np.ndarray):
+        """Hide bins with no uniquely mappable sequence.
+
+        Bins the control profile cannot cover scatter far below the profile
+        because their divisor is zero. Panel targets are never hidden. Display
+        only - the track itself is unchanged.
+        """
+        if not hide_unmappable_bands:
+            return x_bp, vals
+        drop = unmappable_bin_mask(contig, x_bp, int(plot_bin_width))
+        if not drop.any():
+            return x_bp, vals
+        return x_bp[~drop], vals[~drop]
+
     if selected == "All":
         offset_bp = 0
         dj = 0
@@ -1755,6 +1772,7 @@ def _build_cnv_track_scatter_series(
             x_local, vals = downsample_cnv_for_plot(
                 np.asarray(cnv), binw_analysis, int(plot_bin_width)
             )
+            x_local, vals = _drop_unmappable(contig, x_local, vals)
             x_global = offset_bp + x_local
             if filter_finite:
                 pts = [
@@ -1781,6 +1799,7 @@ def _build_cnv_track_scatter_series(
             x_local, vals = downsample_cnv_for_plot(
                 np.asarray(cnv), binw_analysis, int(plot_bin_width)
             )
+            x_local, vals = _drop_unmappable(selected, x_local, vals)
             if filter_finite:
                 pts = [
                     [float(x), float(v)]
