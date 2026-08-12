@@ -436,7 +436,6 @@ CNV_CONTIG_BOUNDARY_WIDTH = 0.9
 CNV_CENTROMERE_WIDTH = 0.8
 #: Gap between a chromosome boundary and its name, as a fraction of the
 #: whole genome width, so the name never sits on top of the line.
-CNV_CONTIG_LABEL_PAD_FRAC = 0.0018
 #: Gap in points between a marker's outer edge and the start of its name.
 CNV_PANEL_LABEL_GAP_PT = 1.6
 
@@ -1467,8 +1466,14 @@ def _apply_cnv_genome_overview_axes(
     title: Optional[str] = None,
     x_max_bp: float,
     use_log: bool = False,
+    contig_ticks: Optional[Sequence[Tuple[float, str]]] = None,
 ) -> None:
-    """Genome-wide CNV panel: y-axis at x=0, no bottom axis line, no genomic tick labels."""
+    """Genome-wide CNV panel: y-axis at x=0, no bottom axis line, no genomic tick labels.
+
+    ``contig_ticks`` places the chromosome names below the axis as tick labels
+    rather than inside the panel. Names drawn inside compete with the data for
+    the same pixels, which is exactly where a deletion sits.
+    """
     _setup_cnv_fonts()
     ax.set_facecolor("white")
     ax.set_xlim(0, x_max_bp)
@@ -1477,7 +1482,7 @@ def _apply_cnv_genome_overview_axes(
         xlabel,
         fontsize=CNV_FONT["axis"],
         color=CNV_TEXT["primary"],
-        labelpad=18,
+        labelpad=4 if contig_ticks else 18,
         fontproperties=_CNV_FONT_REGULAR,
     )
     ax.set_ylabel(
@@ -1499,7 +1504,21 @@ def _apply_cnv_genome_overview_axes(
     ax.spines["bottom"].set_visible(False)
     ax.spines["top"].set_visible(False)
     ax.xaxis.set_ticks_position("none")
-    ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+    if contig_ticks:
+        positions = [float(position) for position, _name in contig_ticks]
+        names = [str(name) for _position, name in contig_ticks]
+        ax.set_xticks(positions)
+        ax.set_xticklabels(
+            names,
+            fontsize=CNV_FONT["tick"],
+            color=CNV_TEXT["primary"],
+            fontproperties=_CNV_FONT_REGULAR,
+        )
+        # No tick marks: the names alone read as the chromosome ruler, and the
+        # bottom spine is hidden anyway.
+        ax.tick_params(axis="x", which="both", bottom=False, labelbottom=True, pad=2)
+    else:
+        ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
     ax.grid(True, axis="y", color=MODERN_COLORS["grid"], linestyle="--", linewidth=0.4, alpha=0.55)
     ax.grid(False, axis="x")
     _apply_cnv_y_tick_ladder(ax, use_log=use_log)
@@ -2302,25 +2321,6 @@ def build_CNV_genome_figure(
         if not plot_normalized:
             _add_cnv_reference_lines(ax, mean_value, std_value, y_min, y_max)
 
-        # Anchored to the start of each chromosome rather than its centre, so a
-        # name reads against the boundary that opens it — on a 24in panel a
-        # centred name is a long way from either edge of its own chromosome.
-        label_y = y_min + (y_max - y_min) * 0.03
-        label_pad_bp = float(offset_bp) * CNV_CONTIG_LABEL_PAD_FRAC
-        for contig, start_bp in chrom_start_offsets.items():
-            ax.text(
-                float(start_bp) + label_pad_bp,
-                label_y,
-                _chromosome_display_name(contig),
-                fontsize=CNV_FONT["tick"],
-                ha="left",
-                va="bottom",
-                rotation=0,
-                color=CNV_TEXT["primary"],
-                fontproperties=_CNV_FONT_REGULAR,
-                clip_on=False,
-            )
-
         ax.set_ylim(y_min, y_max)
         _apply_cnv_genome_overview_axes(
             ax,
@@ -2329,6 +2329,13 @@ def build_CNV_genome_figure(
             title="Copy number variation across chromosomes",
             x_max_bp=offset_bp,
             use_log=plot_normalized,
+            # Centred under each chromosome's own span, below the panel, so the
+            # names never overlap the profile they describe.
+            contig_ticks=[
+                (contig_centers[contig], _chromosome_display_name(contig))
+                for contig in ordered_contigs
+                if contig in contig_centers
+            ],
         )
         if has_lollipops:
             _add_genome_panel_coverage_points(
