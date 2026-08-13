@@ -896,22 +896,61 @@ CNV_REPORT_GENOME_PLOT_BIN_WIDTH = 400_000
 #: about 0.9 MB to the PDF.
 CNV_REPORT_GENOME_PLOT_MAX_SMOOTHING = 4
 
+#: Narrowest display bin the genome summary will draw, whatever the multiplier
+#: above works out to.
+#:
+#: The multiplier alone assumes a coarse analysis track. On a deep run
+#: ``cnv_from_bam`` sizes analysis bins at 1 kb, where 4x gives a 4 kb display
+#: bin holding a median of ~76 reads. Counting 76 things carries 11.5% Poisson
+#: noise, or 0.17 log2 - against a 0.30 calling cut-off. The panel then shows a
+#: dense band of scatter that is pure counting statistics, and no cut-off or
+#: masking removes it, because it is not an artefact.
+#:
+#: 50 kb holds ~950 reads: 3.2% noise, 0.05 log2. It is also the widest bin that
+#: keeps a small homozygous deletion visible, which is the constraint that
+#: matters clinically - reads drop to (1 - deletion/bin) of expected, so:
+#:
+#:     deletion       20 kb    40 kb
+#:     at  50 kb      -0.74    -2.32     both clear the scatter
+#:     at 100 kb      -0.32    -0.74     20 kb is lost in the noise
+#:     at 400 kb      -0.07    -0.15     both invisible
+#:
+#: CDKN2A/B spans ~41 kb, so 100 kb would already be marginal for the deletion
+#: this pipeline most needs to show.
+CNV_REPORT_GENOME_PLOT_MIN_BIN_WIDTH = 50_000
+
+#: Analysis bin width below which the floor above engages.
+#:
+#: The 4x multiplier was measured across every analysis bin width seen in
+#: archived samples - 7 kb and up - and holds the cloud near its gene markers at
+#: all of them. A 1 kb track is finer than anything it was tuned on, and there
+#: the multiplier produces a 4 kb display bin that is almost pure counting
+#: noise. The floor therefore applies only below the tuned range, so behaviour
+#: at every validated width is unchanged.
+CNV_REPORT_GENOME_PLOT_FINE_TRACK_BELOW = 7_000
+
 
 def resolve_cnv_report_genome_plot_bin_width(
     analysis_bin_width: int,
     max_smoothing: int = CNV_REPORT_GENOME_PLOT_MAX_SMOOTHING,
     ceiling: int = CNV_REPORT_GENOME_PLOT_BIN_WIDTH,
+    floor: int = CNV_REPORT_GENOME_PLOT_MIN_BIN_WIDTH,
 ) -> int:
     """Default display bin width for the genome-wide summary.
 
-    Coarse enough to stay readable, but never averaging away so many analysis
-    bins that the cloud can no longer reach the panel gene markers drawn over
-    it. Returns the analysis width itself when that is already coarser than the
-    ceiling, so a shallow run is never smoothed further.
+    Coarse enough that the panel shows copy number rather than counting noise,
+    fine enough that a focal deletion still moves its own dots, and never
+    averaging away so many analysis bins that the cloud cannot reach the panel
+    gene markers drawn over it. Returns the analysis width itself when that is
+    already coarser than the ceiling, so a shallow run is never smoothed
+    further.
     """
     analysis_bw = max(int(analysis_bin_width), 1)
     smoothed = analysis_bw * max(int(max_smoothing), 1)
-    return max(analysis_bw, min(int(ceiling), smoothed))
+    target = smoothed
+    if analysis_bw < CNV_REPORT_GENOME_PLOT_FINE_TRACK_BELOW:
+        target = max(smoothed, max(int(floor), 1))
+    return max(analysis_bw, min(int(ceiling), target))
 
 
 def resolve_cnv_plot_bin_width(
