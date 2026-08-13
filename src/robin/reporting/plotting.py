@@ -2127,6 +2127,7 @@ def build_CNV_genome_figure(
     fig_width: float = CNV_GENOME_FIG_WIDTH,
     fig_height: Optional[float] = None,
     fixed_axis_log2: Optional[float] = None,
+    hide_unmappable_bands: bool = True,
 ):
     """
     Builds the genome-wide CNV matplotlib figure (returns the Figure, or None).
@@ -2208,6 +2209,8 @@ def build_CNV_genome_figure(
             if is_visible_contig(contig, reference_contig_scope)
         ]
 
+        from robin.analysis.cnv_regional import unmappable_bin_mask
+
         for contig in ordered_contigs:
             values = np.asarray(cnv_source[contig], dtype=float)
             chrom_start_offsets[contig] = offset_bp
@@ -2215,6 +2218,19 @@ def build_CNV_genome_figure(
             x_local, plot_values = downsample_cnv_for_plot(
                 values, analysis_bin_width, display_bin_width
             )
+            if hide_unmappable_bands:
+                # Same treatment as the per-chromosome panels: bins the control
+                # profile cannot cover have a divisor near zero, so their log2
+                # ratio explodes downward and sprays the panel with points that
+                # are mappability, not copy number. Display only - the track,
+                # the segmentation and the calls keep every value, and a bin
+                # overlapping a panel target is never hidden.
+                unmappable = unmappable_bin_mask(
+                    contig, x_local, display_bin_width
+                )
+                if unmappable.any():
+                    x_local = x_local[~unmappable]
+                    plot_values = plot_values[~unmappable]
             x_global = offset_bp + x_local
             for position_bp, y_value in zip(x_global, plot_values):
                 y_value = float(y_value)

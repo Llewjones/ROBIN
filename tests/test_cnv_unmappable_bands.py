@@ -161,6 +161,32 @@ def test_protected_intervals_are_merged():
             assert a_end < b_start, f"{chrom} not merged"
 
 
+def test_genome_figure_hides_bins_by_default():
+    """The genome-wide panel was the one plot this was never applied to."""
+    import inspect
+
+    from robin.reporting.plotting import build_CNV_genome_figure
+
+    parameters = inspect.signature(build_CNV_genome_figure).parameters
+    assert parameters["hide_unmappable_bands"].default is True
+
+
+def test_every_cnv_scatter_path_masks():
+    """All three places bins are drawn must go through the mask."""
+    import inspect
+
+    from robin.gui.components.cnv import _build_cnv_track_scatter_series
+    from robin.reporting.plotting import (
+        build_CNV_genome_figure,
+        iter_CNV_chromosome_figures,
+    )
+
+    for func in (build_CNV_genome_figure, iter_CNV_chromosome_figures,
+                 _build_cnv_track_scatter_series):
+        assert "hide_unmappable_bands" in inspect.signature(func).parameters, func
+        assert "unmappable" in inspect.getsource(func), func
+
+
 def test_report_plots_hide_bins_by_default():
     import inspect
 
