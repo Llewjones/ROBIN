@@ -158,8 +158,11 @@ _CNV_GENE_COVERAGE_FILTERS = (
     _CNV_GENE_COVERAGE_FILTER_ALL,
     _CNV_GENE_COVERAGE_FILTER_OUTLIERS,
 )
-_CNV_GENE_GAIN_COLOR = "#DC2626"
-_CNV_GENE_LOSS_COLOR = "#2563EB"
+# Gains orange, losses green - the same convention the PDF reports use, so a
+# gene reads the same way on screen and on paper. These previously ran the other
+# way round from the report (gain red, loss blue).
+_CNV_GENE_GAIN_COLOR = "#EA580C"
+_CNV_GENE_LOSS_COLOR = "#15803D"
 # Soft safety only — axis auto-scales to highlighted genes within this envelope.
 _CNV_LOLLIPOP_LOG_Y_SOFT_CAP = 20.0
 _CNV_LOLLIPOP_LINEAR_Y_SOFT_CAP_FACTOR = 20.0

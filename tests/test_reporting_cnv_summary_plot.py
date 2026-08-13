@@ -726,13 +726,18 @@ def test_clinical_trial_targets_are_purple_whichever_way_they_went() -> None:
 
 
 def test_ordinary_panel_genes_keep_the_gain_loss_colours() -> None:
+    """Gene markers are orange for a gain and green for a loss.
+
+    These are deliberately not the bin-state colours: the point cloud keeps its
+    own blue and red, so a gene name stays legible over bins of its own state.
+    """
     from robin.reporting.plotting import CNV_COLORS, _panel_point_color
 
-    assert _panel_point_color({"direction": "gain"}) == CNV_COLORS["plot_gain"]
-    assert _panel_point_color({"direction": "loss"}) == CNV_COLORS["plot_loss"]
+    assert _panel_point_color({"direction": "gain"}) == CNV_COLORS["gene_gain"]
+    assert _panel_point_color({"direction": "loss"}) == CNV_COLORS["gene_loss"]
     assert (
         _panel_point_color({"direction": "gain", "clinical_trial": False})
-        == CNV_COLORS["plot_gain"]
+        == CNV_COLORS["gene_gain"]
     )
 
 

@@ -53,6 +53,28 @@ def test_every_ink_maps_to_a_real_convention_colour():
         assert key in CNV_COLORS
 
 
+def test_gene_markers_are_orange_for_gain_and_green_for_loss():
+    assert _panel_point_color({"direction": "gain"}) == CNV_COLORS["gene_gain"]
+    assert _panel_point_color({"direction": "loss"}) == CNV_COLORS["gene_loss"]
+
+
+def test_gui_matches_the_report_convention():
+    """These used to run the other way round from the report."""
+    from robin.gui.components.cnv import (
+        _CNV_GENE_GAIN_COLOR,
+        _CNV_GENE_LOSS_COLOR,
+    )
+
+    assert _CNV_GENE_GAIN_COLOR == CNV_COLORS["gene_gain"]
+    assert _CNV_GENE_LOSS_COLOR == CNV_COLORS["gene_loss"]
+
+
+def test_bin_scatter_keeps_its_own_colours():
+    """Only the gene markers and names were recoloured, not the point cloud."""
+    assert CNV_COLORS["plot_gain"] != CNV_COLORS["gene_gain"]
+    assert CNV_COLORS["plot_loss"] != CNV_COLORS["gene_loss"]
+
+
 def test_unknown_marker_colour_falls_back_to_itself():
     """Never drop a label because its colour is unrecognised."""
     assert _panel_label_color({"direction": "gain", "clinical_trial": False})

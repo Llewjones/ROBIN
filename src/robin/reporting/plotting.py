@@ -72,6 +72,11 @@ CNV_COLORS = {
     "plot_loss": "#C81E1E",
     "plot_neutral": "#9CA3AF",
     "plot_trial": "#7E22CE",
+    # Gene markers and their names, kept separate from the bin-state colours
+    # above so the point cloud is not repainted with them: a gain is orange and
+    # a loss is green wherever a gene is named, in the report and the GUI alike.
+    "gene_gain": "#EA580C",
+    "gene_loss": "#15803D",
     "cutoff": "#B45309",
     # Darker than the plain grid: reviewers need the chromosome boundary and
     # the p/q split to be readable at a glance on a 24in genome panel.
@@ -90,8 +95,8 @@ CNV_POINT_ALPHA_DEFAULT = 0.45
 #: marker keeps the convention colour; only the text is darkened, and the white
 #: halo below carries the rest of the separation.
 CNV_LABEL_INK = {
-    "plot_gain": "#0B2A6F",
-    "plot_loss": "#7A0F0F",
+    "gene_gain": "#9A3412",
+    "gene_loss": "#14532D",
     "plot_trial": "#5B1A94",
 }
 
@@ -1036,9 +1041,9 @@ def _panel_point_color(point: Dict[str, Any]) -> str:
     if point.get("clinical_trial"):
         return CNV_COLORS["plot_trial"]
     return (
-        CNV_COLORS["plot_gain"]
+        CNV_COLORS["gene_gain"]
         if point.get("direction") == "gain"
-        else CNV_COLORS["plot_loss"]
+        else CNV_COLORS["gene_loss"]
     )
 
 
