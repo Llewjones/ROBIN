@@ -125,3 +125,34 @@ def test_there_is_a_deliberate_step_at_the_boundary():
     terms, so the step costs nothing in practice.
     """
     assert resolve(5_000) > resolve(7_000)
+
+
+# ---------------------------------------------------------------- chromosome panels
+
+def test_chromosome_panels_do_not_draw_at_the_analysis_width():
+    """They used to draw every 1 kb analysis bin - 0.33 log2 of counting noise."""
+    from robin.analysis.cnv_analysis import resolve_cnv_plot_bin_width
+
+    assert resolve_cnv_plot_bin_width(1_000, None) == 50_000
+    assert resolve_cnv_plot_bin_width(5_000, None) == 50_000
+
+
+def test_chromosome_panels_honour_an_explicit_choice():
+    from robin.analysis.cnv_analysis import resolve_cnv_plot_bin_width
+
+    assert resolve_cnv_plot_bin_width(1_000, 1_000_000) == 1_000_000
+    assert resolve_cnv_plot_bin_width(1_000, 500_000) == 500_000
+
+
+def test_chromosome_panels_leave_coarse_tracks_alone():
+    from robin.analysis.cnv_analysis import resolve_cnv_plot_bin_width
+
+    for analysis_bw in (7_000, 60_000, 431_000):
+        assert resolve_cnv_plot_bin_width(analysis_bw, None) == analysis_bw
+
+
+def test_display_width_never_finer_than_analysis_width():
+    from robin.analysis.cnv_analysis import resolve_cnv_plot_bin_width
+
+    for analysis_bw in (1_000, 50_000, 431_000, 2_000_000):
+        assert resolve_cnv_plot_bin_width(analysis_bw, 1_000) >= analysis_bw

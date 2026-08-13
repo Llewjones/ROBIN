@@ -956,11 +956,24 @@ def resolve_cnv_report_genome_plot_bin_width(
 def resolve_cnv_plot_bin_width(
     analysis_bin_width: int,
     plot_bin_width: Optional[int] = None,
+    floor: int = CNV_REPORT_GENOME_PLOT_MIN_BIN_WIDTH,
 ) -> int:
-    """Resolve display bin width the same way as the GUI CNV plot selector."""
+    """Resolve display bin width the same way as the GUI CNV plot selector.
+
+    An explicit choice is honoured as given. With no choice the per-chromosome
+    panels used to draw at the analysis width itself - on a deep run that is
+    1 kb, a median of 19 reads per point and 0.33 log2 of counting noise against
+    a 0.30 cut-off, so the panel showed noise rather than copy number. The same
+    floor as the genome summary applies below the tuned range, keeping a 20 kb
+    homozygous deletion clear of the scatter while removing the noise it was
+    buried in.
+    """
+    analysis_bw = max(int(analysis_bin_width), 1)
     if plot_bin_width is None or plot_bin_width <= 0:
-        return int(analysis_bin_width)
-    return max(int(plot_bin_width), int(analysis_bin_width))
+        if analysis_bw < CNV_REPORT_GENOME_PLOT_FINE_TRACK_BELOW:
+            return max(analysis_bw, max(int(floor), 1))
+        return analysis_bw
+    return max(int(plot_bin_width), analysis_bw)
 
 
 def downsample_cnv_for_plot(
