@@ -726,13 +726,18 @@ def test_clinical_trial_targets_are_purple_whichever_way_they_went() -> None:
 
 
 def test_ordinary_panel_genes_keep_the_gain_loss_colours() -> None:
+    """Gene markers are orange for a gain and green for a loss.
+
+    These are deliberately not the bin-state colours: the point cloud keeps its
+    own blue and red, so a gene name stays legible over bins of its own state.
+    """
     from robin.reporting.plotting import CNV_COLORS, _panel_point_color
 
-    assert _panel_point_color({"direction": "gain"}) == CNV_COLORS["plot_gain"]
-    assert _panel_point_color({"direction": "loss"}) == CNV_COLORS["plot_loss"]
+    assert _panel_point_color({"direction": "gain"}) == CNV_COLORS["gene_gain"]
+    assert _panel_point_color({"direction": "loss"}) == CNV_COLORS["gene_loss"]
     assert (
         _panel_point_color({"direction": "gain", "clinical_trial": False})
-        == CNV_COLORS["plot_gain"]
+        == CNV_COLORS["gene_gain"]
     )
 
 
@@ -762,7 +767,7 @@ def test_report_caption_names_the_purple_convention() -> None:
     without = cnv_report_plot_caption("normalized_difference")
 
     assert "purple" in with_trials
-    assert "clinical trial" in with_trials
+    assert "Step 2" in with_trials
     assert "purple" not in without
     # Both state the swapped gain/loss convention.
     for caption in (with_trials, without):
@@ -797,7 +802,7 @@ def test_clinical_trial_legend_is_drawn_on_the_figure() -> None:
     try:
         assert _add_clinical_trial_legend(fig, [{"clinical_trial": True}]) is True
         texts = [t.get_text() for t in fig.texts]
-        assert any("clinical trial targets" in t for t in texts)
+        assert any("Step 2 targets" in t for t in texts)
     finally:
         plt.close(fig)
 
@@ -1483,8 +1488,13 @@ def test_genome_figure_still_fits_the_data_by_default() -> None:
         plt.close(fig)
 
 
-def test_chromosome_names_are_anchored_at_the_start_of_each_chromosome() -> None:
-    """Centred names sit a long way from either edge on a 24in panel."""
+def test_chromosome_names_are_tick_labels_centred_under_their_span() -> None:
+    """Reviewers asked for the names outside the panel, where nothing overlaps them.
+
+    They used to be drawn inside the axes, anchored at each chromosome's start
+    to keep them near their own boundary. Below the axis there is nothing to
+    collide with, so each name centres under the span it belongs to.
+    """
     import matplotlib.pyplot as plt
 
     from robin.reporting.plotting import build_CNV_genome_figure
@@ -1501,23 +1511,15 @@ def test_chromosome_names_are_anchored_at_the_start_of_each_chromosome() -> None
     )
     try:
         axis = fig.axes[0]
-        positions = {
-            text.get_text(): text.get_position()[0]
-            for text in axis.texts
-            if text.get_text() in {"1", "2"}
-        }
-        assert set(positions) == {"1", "2"}
+        labels = [text.get_text() for text in axis.get_xticklabels()]
+        assert labels == ["1", "2"]
         # chr1 spans 0-100 Mb, chr2 100-160 Mb.
-        assert positions["1"] < 5_000_000, positions
-        assert 100_000_000 <= positions["2"] < 105_000_000, positions
-        # Not the old centres (50 Mb and 130 Mb).
-        assert abs(positions["1"] - 50_000_000) > 40_000_000
-        assert abs(positions["2"] - 130_000_000) > 20_000_000
-        # Padded clear of the boundary line rather than sitting on it.
-        assert positions["2"] > 100_000_000
+        ticks = list(axis.get_xticks())
+        assert ticks[0] == pytest.approx(50_000_000)
+        assert ticks[1] == pytest.approx(130_000_000)
+        # Nothing left inside the panel.
         for text in axis.texts:
-            if text.get_text() in {"1", "2"}:
-                assert text.get_ha() == "left"
+            assert text.get_text() not in {"1", "2"}
     finally:
         plt.close(fig)
 
@@ -2274,3 +2276,56 @@ def test_full_range_axis_page_is_not_labelled_as_a_second_page() -> None:
     finally:
         for _contig, fig in figures:
             plt.close(fig)
+
+
+def test_step2_naming_replaces_clinical_trial_in_user_facing_text() -> None:
+    """The site renamed these targets to "Step 2" to avoid confusion with WGS trials.
+
+    Only the wording changed: the ``[cnv].clinical_trial_genes`` config key stays
+    as it is, so existing workflow settings keep working.
+    """
+    from robin.gui.plotting_preferences import CNV_STEP2_LEGEND
+    from robin.reporting.sections.cnv import CNVSection
+
+    assert "Step 2" in CNV_STEP2_LEGEND
+    assert "clinical trial" not in CNV_STEP2_LEGEND.casefold()
+    assert "Step 2" in CNVSection.NGTD_TABLE_TITLE
+    assert "clinical trial" not in CNVSection.NGTD_TABLE_TITLE.casefold()
+
+
+def test_chromosome_names_sit_below_the_genome_panel_not_inside_it() -> None:
+    """Names drawn inside the panel sit on top of the data they describe."""
+    import matplotlib.pyplot as plt
+
+    from robin.reporting.plotting import _apply_cnv_genome_overview_axes
+
+    fig, ax = plt.subplots()
+    try:
+        _apply_cnv_genome_overview_axes(
+            ax,
+            xlabel="Chromosome",
+            ylabel="Log2 ratio",
+            x_max_bp=3_000.0,
+            contig_ticks=[(500.0, "1"), (1_500.0, "2"), (2_500.0, "X")],
+        )
+        assert [t.get_text() for t in ax.get_xticklabels()] == ["1", "2", "X"]
+        assert list(ax.get_xticks()) == [500.0, 1_500.0, 2_500.0]
+        # Nothing written into the panel itself.
+        assert list(ax.texts) == []
+    finally:
+        plt.close(fig)
+
+
+def test_genome_axes_stay_bare_without_contig_ticks() -> None:
+    import matplotlib.pyplot as plt
+
+    from robin.reporting.plotting import _apply_cnv_genome_overview_axes
+
+    fig, ax = plt.subplots()
+    try:
+        _apply_cnv_genome_overview_axes(
+            ax, xlabel="Chromosome", ylabel="Log2 ratio", x_max_bp=3_000.0
+        )
+        assert not any(t.get_text() for t in ax.get_xticklabels())
+    finally:
+        plt.close(fig)

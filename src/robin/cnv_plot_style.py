@@ -14,6 +14,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple
 
+import math
+
 import numpy as np
 import pandas as pd
 
@@ -154,7 +156,31 @@ def gene_bin_window(start_bin: int, stop_bin: int, n_bins: int,
 
 # CNV_SEGMENT_MIN_BINS keeps focal events (a four-bin CDKN2A deletion) callable.
 CNV_SEGMENT_MIN_BINS = 3
+
+#: How much of the bin-to-bin noise variance a split must explain to be kept.
+#:
+#: Held high on purpose. This is what keeps a quiet chromosome arm as one long
+#: line instead of a row of steps: at 20, 38% of the genome sits in runs longer
+#: than 10 Mb; at 10 that falls to 12%, and at 5 to 2%. Lowering it to get focal
+#: events resolved trades away exactly the long neutral lines that make the
+#: plot readable.
+#:
+#: Focal events are recovered separately, by ``_split_focal_runs`` below, so the
+#: two behaviours are controlled independently rather than fighting over one
+#: number.
 CNV_SEGMENT_PENALTY = 20.0
+
+#: A run must hold at least this many bins to be split out as a focal event.
+#: Two bins at 50 kb is 100 kb — below that a single outlying bin would become
+#: its own segment.
+CNV_SEGMENT_FOCAL_MIN_BINS = 2
+
+#: How many standard errors a short run must sit away from the level around it
+#: before it is drawn as its own segment. Higher than the merge test because a
+#: focal split is asserted against a long, well-measured neighbour, so the bar
+#: for interrupting it should be higher than for merely keeping two levels
+#: apart.
+CNV_SEGMENT_FOCAL_SIGMAS = 5.0
 
 #: A jump between consecutive x positions larger than this multiple of the median
 #: spacing is treated as a gap in coverage, and a segment may not cross it. The
@@ -464,7 +490,94 @@ def cnv_segment_bounds(
         stack.append((start + split, end))
         stack.append((start, start + split))
     bounds.sort()
-    return _merge_indistinguishable_segments(arr, bounds, sigma)
+    bounds = _merge_indistinguishable_segments(arr, bounds, sigma)
+    return _split_focal_runs(arr, bounds, sigma, min_bins=int(min_size))
+
+
+def _split_focal_runs(
+    arr: np.ndarray,
+    bounds: List[Tuple[int, int]],
+    sigma: float,
+    *,
+    min_bins: int = CNV_SEGMENT_MIN_BINS,
+    sigmas: float = CNV_SEGMENT_FOCAL_SIGMAS,
+) -> List[Tuple[int, int]]:
+    """Cut short, strongly deviating runs out of the long levels around them.
+
+    The penalty above is deliberately high so a quiet arm stays one line, but
+    that same bar rejects a focal event: a handful of bins contribute little
+    total sum-of-squares however far they sit from the level, so the splitter
+    never proposes them. This pass asks the focal question directly - is there a
+    short run here whose mean the surrounding level cannot account for? - and
+    draws it as its own segment when there is.
+
+    The result is the shape analysts read off a methylation array plot: long
+    lines across neutral regions, short lines at real gains and losses.
+    """
+    if sigma <= 0 or not bounds:
+        return bounds
+
+    floor = max(int(min_bins), int(CNV_SEGMENT_FOCAL_MIN_BINS), 1)
+    out: List[Tuple[int, int]] = []
+    for start, end in bounds:
+        segment = arr[start:end]
+        finite = segment[np.isfinite(segment)]
+        # Too short to hold a focal run and a level around it.
+        if finite.size < floor * 3:
+            out.append((start, end))
+            continue
+        level = float(np.median(finite))
+
+        # Candidate bins: far enough from the level that they are worth testing
+        # as a group. One sigma is deliberately permissive - the run-level test
+        # below is what actually decides.
+        deviation = segment - level
+        flagged = np.isfinite(segment) & (np.abs(deviation) > sigma)
+        cuts: List[Tuple[int, int]] = []
+        index = 0
+        while index < flagged.size:
+            if not flagged[index]:
+                index += 1
+                continue
+            run_start = index
+            sign = np.sign(deviation[index])
+            while (
+                index < flagged.size
+                and flagged[index]
+                and np.sign(deviation[index]) == sign
+            ):
+                index += 1
+            run_end = index
+            if run_end - run_start < floor:
+                continue
+            run = segment[run_start:run_end]
+            run = run[np.isfinite(run)]
+            if run.size < floor:
+                continue
+            # Leave a level either side; a run touching both ends is the whole
+            # segment, not a focal event within it.
+            if run_start == 0 and run_end == segment.size:
+                continue
+            standard_error = sigma / math.sqrt(run.size)
+            if abs(float(np.mean(run)) - level) < sigmas * standard_error:
+                continue
+            cuts.append((run_start, run_end))
+
+        if not cuts:
+            out.append((start, end))
+            continue
+
+        cursor = 0
+        for run_start, run_end in cuts:
+            if run_start > cursor:
+                out.append((start + cursor, start + run_start))
+            out.append((start + run_start, start + run_end))
+            cursor = run_end
+        if cursor < segment.size:
+            out.append((start + cursor, end))
+
+    out.sort()
+    return out
 
 
 def _merge_indistinguishable_segments(

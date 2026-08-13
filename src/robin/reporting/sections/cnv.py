@@ -26,6 +26,7 @@ from reportlab.platypus import (
 from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
 from ..sections.base import ReportSection
+from robin.cnv_plot_style import CNV_CHROMOSOME_AXIS_LOG2
 from ..plotting import (
     create_CNV_plot,
     create_CNV_plot_per_chromosome,
@@ -45,7 +46,7 @@ from ..plotting import (
 #: narrow band with empty axis above and below it.
 GENOME_SUMMARY_ASPECT = 3.2
 
-#: Purple used for the clinical-trial legend, matching the marker colour on
+#: Purple used for the Step 2 legend, matching the marker colour on
 #: the figures so the note and the genes it describes read as one thing.
 CNV_REPORT_TRIAL_LEGEND_COLOR = "#7E22CE"
 
@@ -66,7 +67,7 @@ def _image_aspect(img_buf, fallback_ratio: float) -> float:
 
 
 def _clinical_trial_genes(report) -> tuple:
-    """Clinical trial target genes for this run, from workflow config."""
+    """Step 2 target genes for this run, from workflow config."""
     try:
         from robin.workflow_config import get_cnv_clinical_trial_genes
 
@@ -265,12 +266,12 @@ class CNVSection(ReportSection):
             frame_padding_pt=CNV_REPORT_FRAME_PADDING_PT,
         )
 
-    NGTD_TABLE_TITLE = "NGTD and Clinical Trial Targets CNVs"
+    NGTD_TABLE_TITLE = "NGTD and Step 2 Targets CNVs"
 
     def _append_ngtd_target_table(
         self, log2_cnv, bin_width: int, sex_estimate: str, panel_genes_df
     ) -> None:
-        """Every NGTD / clinical trial target and its CNV state, event or not.
+        """Every NGTD / Step 2 target and its CNV state, event or not.
 
         Targets with nothing on them are listed too, so the table reads as
         "these were looked at" rather than leaving the reader to infer it from
@@ -323,11 +324,27 @@ class CNVSection(ReportSection):
             )
         )
         self.elements.append(Spacer(1, 2))
+        # Purple marks a Step 2 target, matching the gene markers on the plots so
+        # the table and the figures read the same way.
+        try:
+            from robin.reporting.plotting import _panel_label_matches_configured
+            from robin.workflow_config import get_cnv_clinical_trial_genes
+
+            step2_genes = tuple(get_cnv_clinical_trial_genes())
+        except Exception:
+            logger.debug("Could not resolve Step 2 target genes", exc_info=True)
+            step2_genes = ()
+
         table_rows = [["Gene", "Chr", "Log2 ratio", "Result"]]
+        any_step2 = False
         for row in rows:
+            gene = str(row["gene"])
+            if step2_genes and _panel_label_matches_configured(gene, step2_genes):
+                any_step2 = True
+                gene = f'<font color="{CNV_REPORT_TRIAL_LEGEND_COLOR}"><b>{gene}</b></font>'
             table_rows.append(
                 [
-                    row["gene"],
+                    gene,
                     row["chrom"] or "--",
                     f"{row['value']:+.2f}" if row["value"] is not None else "--",
                     row["state"],
@@ -344,7 +361,12 @@ class CNVSection(ReportSection):
                 f"&quot;{CNV_GENE_NOT_LOCATED_LABEL}&quot; means it is not a target on this "
                 f"sample's panel and so was not assessed \u2014 that is not the same as no change. "
                 f"The value shown is the most extreme bin overlapping the gene, matching the "
-                f"gene markers on the plots.",
+                f"gene markers on the plots."
+                + (
+                    " Genes in purple are current Step 2 targets."
+                    if any_step2
+                    else ""
+                ),
                 ParagraphStyle(
                     "NGTDNote",
                     parent=self.styles.styles["Normal"],
@@ -1235,8 +1257,14 @@ class CNVSection(ReportSection):
                     # report is read one chromosome at a time, so true depth
                     # matters more than comparability between them. The fixed
                     # window remains on the live view and the Chromosome PDFs.
-                    fixed_axis_log2=None,
-                    full_range_axis=True,
+                    # Zoomed to the fixed window in the report body: the
+                    # full-range view flattens ordinary gains and losses to
+                    # accommodate a handful of extreme bins. Both views are
+                    # still available in the downloadable per-chromosome PDF,
+                    # which adds a full-range page whenever bins fall outside
+                    # this window.
+                    fixed_axis_log2=CNV_CHROMOSOME_AXIS_LOG2,
+                    full_range_axis=False,
                     # Four plots to a page, so the purple legend is stated once
                     # in the body text below instead of on every figure, where
                     # it collided with the chromosome titles.
@@ -1291,13 +1319,13 @@ class CNVSection(ReportSection):
                 # than on each of the four figures per page.
                 if trial_genes:
                     from robin.gui.plotting_preferences import (
-                        CNV_CLINICAL_TRIAL_LEGEND,
+                        CNV_STEP2_LEGEND,
                     )
 
                     self.elements.append(Spacer(1, 4))
                     self.elements.append(
                         Paragraph(
-                            CNV_CLINICAL_TRIAL_LEGEND,
+                            CNV_STEP2_LEGEND,
                             ParagraphStyle(
                                 "CNVTrialLegend",
                                 parent=self.styles.styles["Normal"],

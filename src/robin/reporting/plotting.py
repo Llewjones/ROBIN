@@ -67,11 +67,16 @@ CNV_COLORS = {
     "loss_edge": "#A94442",
     "gene": "#5C6BC0",
     # Report convention (PDF only; the live GUI keeps its own palette):
-    # gains blue, losses red, clinical trial targets purple whichever way they went.
+    # gains blue, losses red, Step 2 targets purple whichever way they went.
     "plot_gain": "#1D4ED8",
     "plot_loss": "#C81E1E",
     "plot_neutral": "#9CA3AF",
     "plot_trial": "#7E22CE",
+    # Gene markers and their names, kept separate from the bin-state colours
+    # above so the point cloud is not repainted with them: a gain is orange and
+    # a loss is green wherever a gene is named, in the report and the GUI alike.
+    "gene_gain": "#EA580C",
+    "gene_loss": "#15803D",
     "cutoff": "#B45309",
     # Darker than the plain grid: reviewers need the chromosome boundary and
     # the p/q split to be readable at a glance on a 24in genome panel.
@@ -84,8 +89,19 @@ CNV_POINT_ALPHA_NEUTRAL = 0.38
 CNV_POINT_ALPHA_CALLED = 0.72
 CNV_POINT_ALPHA_DEFAULT = 0.45
 
+#: Gene names are inked darker than the marker they name. On the genome panel a
+#: name sits directly on the bin scatter, which uses these same gain/loss blues
+#: and reds, so a label in the marker's own colour sinks into the cloud. The
+#: marker keeps the convention colour; only the text is darkened, and the white
+#: halo below carries the rest of the separation.
+CNV_LABEL_INK = {
+    "gene_gain": "#9A3412",
+    "gene_loss": "#14532D",
+    "plot_trial": "#5B1A94",
+}
+
 _CNV_GENE_LABEL_PATH_EFFECTS = [
-    mpath_effects.withStroke(linewidth=2.6, foreground="white", alpha=0.95),
+    mpath_effects.withStroke(linewidth=3.0, foreground="white", alpha=0.98),
 ]
 CNV_FONT = {
     "title": 11,
@@ -436,7 +452,6 @@ CNV_CONTIG_BOUNDARY_WIDTH = 0.9
 CNV_CENTROMERE_WIDTH = 0.8
 #: Gap between a chromosome boundary and its name, as a fraction of the
 #: whole genome width, so the name never sits on top of the line.
-CNV_CONTIG_LABEL_PAD_FRAC = 0.0018
 #: Gap in points between a marker's outer edge and the start of its name.
 CNV_PANEL_LABEL_GAP_PT = 1.6
 
@@ -544,21 +559,36 @@ def _normalise_coverage_to_cnv_axis(
     return float(scale_mean_cnv) * ratio
 
 
+def _panel_label_components(label: str) -> List[str]:
+    """The individual gene symbols making up a panel target label.
+
+    Panel BED names are composite where targets overlap: rCNS2 writes
+    ``CDKN2A,CDKN2B,CDKN2B-AS1`` and ``CASC11,MYC``, while the packaged NGTD
+    list uses slashes (``CDKN2B/CDKN2B-AS1``). Matching the whole string against
+    a configured symbol therefore fails for 57 of the 243 rCNS2 targets - among
+    them CDKN2A/B, NF1, ERBB2, MYCN and MLH1 - so each component is matched
+    separately.
+    """
+    parts = str(label).replace("/", ",").split(",")
+    return [part.strip().casefold() for part in parts if part.strip()]
+
+
 def _panel_label_matches_configured(label: str, configured_genes: Sequence[str]) -> bool:
     """True when a panel target label matches a configured ``[cnv].genes`` symbol."""
-    key = str(label).strip().casefold()
-    if not key:
+    components = _panel_label_components(label)
+    if not components:
         return False
     for gene in configured_genes:
         want = str(gene).strip().casefold()
         if not want:
             continue
-        if key == want:
-            return True
-        if key.startswith(f"{want}_") or key.startswith(f"{want}-") or key.startswith(
-            f"{want} "
-        ):
-            return True
+        for key in components:
+            if key == want:
+                return True
+            if key.startswith(f"{want}_") or key.startswith(f"{want}-") or key.startswith(
+                f"{want} "
+            ):
+                return True
     return False
 
 
@@ -724,7 +754,7 @@ def _tag_clinical_trial_points(
     points: List[Dict[str, Any]],
     clinical_trial_genes: Sequence[str],
 ) -> List[Dict[str, Any]]:
-    """Mark panel points whose gene is a current clinical trial target."""
+    """Mark panel points whose gene is a current Step 2 target."""
     if not clinical_trial_genes:
         return points
     return [
@@ -973,7 +1003,7 @@ def _add_panel_coverage_points(
     )
     for point in coverage_points:
         x_pos = float(point[x_key])
-        color = _panel_point_color(point)
+        color = _panel_label_color(point)
         label_y = head_label_y[(point["label"], x_pos)]
         above = label_y >= float(point["y_norm"])
         ax_cnv.text(
@@ -1004,17 +1034,31 @@ def _add_panel_coverage_points(
 def _panel_point_color(point: Dict[str, Any]) -> str:
     """Colour for a panel gene marker and its label.
 
-    Clinical trial targets are purple whichever way they went, so a reporting
+    Step 2 targets are purple whichever way they went, so a reporting
     scientist can pick out the genes with a trial route at a glance; everything
     else follows the report's gain/loss convention.
     """
     if point.get("clinical_trial"):
         return CNV_COLORS["plot_trial"]
     return (
-        CNV_COLORS["plot_gain"]
+        CNV_COLORS["gene_gain"]
         if point.get("direction") == "gain"
-        else CNV_COLORS["plot_loss"]
+        else CNV_COLORS["gene_loss"]
     )
+
+
+def _panel_label_color(point: Dict[str, Any]) -> str:
+    """Ink for a panel gene's name.
+
+    The same convention as its marker - purple for a Step 2 target, otherwise
+    gain/loss - but darker, so the name stays readable where it overlies bins
+    of its own colour.
+    """
+    marker = _panel_point_color(point)
+    for key, ink in CNV_LABEL_INK.items():
+        if marker == CNV_COLORS[key]:
+            return ink
+    return marker
 
 
 def _gene_cnv_direction(
@@ -1157,6 +1201,7 @@ def _collect_chromosome_significant_panel_points(
         use_max_abs=use_log2,
         target_coverage_df=target_coverage_df,
         cutoff_override=cutoff_override,
+        configured_genes=configured_genes,
     )
     selected = _select_panel_coverage_points(
         panel_points,
@@ -1221,6 +1266,7 @@ def _collect_genome_significant_panel_points(
             use_max_abs=use_log2,
             target_coverage_df=target_coverage_df,
             cutoff_override=cutoff_override,
+            configured_genes=configured_genes,
         )
 
         chrom_offset = float(chrom_start_offsets.get(contig, 0.0))
@@ -1278,13 +1324,13 @@ def _add_clinical_trial_legend(
     """
     if not any(point.get("clinical_trial") for point in coverage_points):
         return False
-    from robin.gui.plotting_preferences import CNV_CLINICAL_TRIAL_LEGEND
+    from robin.gui.plotting_preferences import CNV_STEP2_LEGEND
 
     at_top = str(corner) == "top"
     fig.text(
         0.995,
         0.995 if at_top else 0.005,
-        CNV_CLINICAL_TRIAL_LEGEND,
+        CNV_STEP2_LEGEND,
         ha="right",
         va="top" if at_top else "bottom",
         fontsize=CNV_FONT["annotation"],
@@ -1450,8 +1496,14 @@ def _apply_cnv_genome_overview_axes(
     title: Optional[str] = None,
     x_max_bp: float,
     use_log: bool = False,
+    contig_ticks: Optional[Sequence[Tuple[float, str]]] = None,
 ) -> None:
-    """Genome-wide CNV panel: y-axis at x=0, no bottom axis line, no genomic tick labels."""
+    """Genome-wide CNV panel: y-axis at x=0, no bottom axis line, no genomic tick labels.
+
+    ``contig_ticks`` places the chromosome names below the axis as tick labels
+    rather than inside the panel. Names drawn inside compete with the data for
+    the same pixels, which is exactly where a deletion sits.
+    """
     _setup_cnv_fonts()
     ax.set_facecolor("white")
     ax.set_xlim(0, x_max_bp)
@@ -1460,7 +1512,7 @@ def _apply_cnv_genome_overview_axes(
         xlabel,
         fontsize=CNV_FONT["axis"],
         color=CNV_TEXT["primary"],
-        labelpad=18,
+        labelpad=4 if contig_ticks else 18,
         fontproperties=_CNV_FONT_REGULAR,
     )
     ax.set_ylabel(
@@ -1482,7 +1534,21 @@ def _apply_cnv_genome_overview_axes(
     ax.spines["bottom"].set_visible(False)
     ax.spines["top"].set_visible(False)
     ax.xaxis.set_ticks_position("none")
-    ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
+    if contig_ticks:
+        positions = [float(position) for position, _name in contig_ticks]
+        names = [str(name) for _position, name in contig_ticks]
+        ax.set_xticks(positions)
+        ax.set_xticklabels(
+            names,
+            fontsize=CNV_FONT["tick"],
+            color=CNV_TEXT["primary"],
+            fontproperties=_CNV_FONT_REGULAR,
+        )
+        # No tick marks: the names alone read as the chromosome ruler, and the
+        # bottom spine is hidden anyway.
+        ax.tick_params(axis="x", which="both", bottom=False, labelbottom=True, pad=2)
+    else:
+        ax.tick_params(axis="x", which="both", bottom=False, labelbottom=False)
     ax.grid(True, axis="y", color=MODERN_COLORS["grid"], linestyle="--", linewidth=0.4, alpha=0.55)
     ax.grid(False, axis="x")
     _apply_cnv_y_tick_ladder(ax, use_log=use_log)
@@ -1832,30 +1898,28 @@ def _scatter_cnv_genome_points(
     *,
     color_by_state: bool,
     show_trend: bool = True,
-    arm_levels: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> None:
     """Scatter genome-wide CNV points, optionally coloured by threshold state."""
     if show_trend and "contig" in df.columns:
         # One trace per chromosome so the trend never bridges a chromosome boundary.
         for _contig, subset in df.groupby("contig", sort=False):
             ordered = subset.sort_values("position_bp")
-            # One level per arm, at the arm mean, so the genome-wide figure and
-            # the arm / whole-chromosome table cannot disagree about the same
-            # arm. Finer segmentation here tracks coverage structure rather than
-            # copy number; the per-chromosome pages keep the detailed line.
-            spans = cnv_arm_mean_spans(
+            # The same segmented line the per-chromosome pages draw, rather than
+            # one level per arm. An arm mean averages a sub-arm event with the
+            # quiet sequence beside it and draws the line below its own gain: on
+            # a real sample 19p averaged +0.26 over a +0.48 block at 19.9-24.2 Mb
+            # and a +0.22 remainder, so the line ran under the visible cluster.
+            #
+            # The cost is that this line and the arm / whole-chromosome table are
+            # no longer guaranteed to show the same level for an arm, because
+            # they are answering different questions - the table calls the arm,
+            # the line follows the profile. The table remains the authority for
+            # arm-level calls.
+            spans = cnv_segment_spans(
                 np.asarray(ordered["position_bp"], dtype=float),
                 np.asarray(ordered["ploidy"], dtype=float),
                 split_at=_centromere_split(_contig, 1.0),
             )
-            # Replace each arm's level with the value the table called on.
-            called = (arm_levels or {}).get(str(_contig))
-            if called and spans:
-                names = ["p", "q"] if len(spans) == 2 else ["q"]
-                spans = [
-                    (s, e, called.get(name, level))
-                    for (s, e, level), name in zip(spans, names)
-                ]
             if spans:
                 ax.hlines(
                     [level for _s, _e, level in spans],
@@ -2061,6 +2125,7 @@ def build_CNV_genome_figure(
     fig_width: float = CNV_GENOME_FIG_WIDTH,
     fig_height: Optional[float] = None,
     fixed_axis_log2: Optional[float] = None,
+    hide_unmappable_bands: bool = True,
 ):
     """
     Builds the genome-wide CNV matplotlib figure (returns the Figure, or None).
@@ -2142,6 +2207,8 @@ def build_CNV_genome_figure(
             if is_visible_contig(contig, reference_contig_scope)
         ]
 
+        from robin.analysis.cnv_regional import unmappable_bin_mask
+
         for contig in ordered_contigs:
             values = np.asarray(cnv_source[contig], dtype=float)
             chrom_start_offsets[contig] = offset_bp
@@ -2149,6 +2216,19 @@ def build_CNV_genome_figure(
             x_local, plot_values = downsample_cnv_for_plot(
                 values, analysis_bin_width, display_bin_width
             )
+            if hide_unmappable_bands:
+                # Same treatment as the per-chromosome panels: bins the control
+                # profile cannot cover have a divisor near zero, so their log2
+                # ratio explodes downward and sprays the panel with points that
+                # are mappability, not copy number. Display only - the track,
+                # the segmentation and the calls keep every value, and a bin
+                # overlapping a panel target is never hidden.
+                unmappable = unmappable_bin_mask(
+                    contig, x_local, display_bin_width
+                )
+                if unmappable.any():
+                    x_local = x_local[~unmappable]
+                    plot_values = plot_values[~unmappable]
             x_global = offset_bp + x_local
             for position_bp, y_value in zip(x_global, plot_values):
                 y_value = float(y_value)
@@ -2238,9 +2318,6 @@ def build_CNV_genome_figure(
             df,
             color_by_state=plot_normalized,
             show_trend=show_trend,
-            arm_levels=_arm_levels_from_calling_track(
-                getattr(result, "cnv", None), analysis_bin_width, sex_estimate
-            ),
         )
 
         for boundary in contig_boundaries[:-1]:
@@ -2285,25 +2362,6 @@ def build_CNV_genome_figure(
         if not plot_normalized:
             _add_cnv_reference_lines(ax, mean_value, std_value, y_min, y_max)
 
-        # Anchored to the start of each chromosome rather than its centre, so a
-        # name reads against the boundary that opens it — on a 24in panel a
-        # centred name is a long way from either edge of its own chromosome.
-        label_y = y_min + (y_max - y_min) * 0.03
-        label_pad_bp = float(offset_bp) * CNV_CONTIG_LABEL_PAD_FRAC
-        for contig, start_bp in chrom_start_offsets.items():
-            ax.text(
-                float(start_bp) + label_pad_bp,
-                label_y,
-                _chromosome_display_name(contig),
-                fontsize=CNV_FONT["tick"],
-                ha="left",
-                va="bottom",
-                rotation=0,
-                color=CNV_TEXT["primary"],
-                fontproperties=_CNV_FONT_REGULAR,
-                clip_on=False,
-            )
-
         ax.set_ylim(y_min, y_max)
         _apply_cnv_genome_overview_axes(
             ax,
@@ -2312,6 +2370,13 @@ def build_CNV_genome_figure(
             title="Copy number variation across chromosomes",
             x_max_bp=offset_bp,
             use_log=plot_normalized,
+            # Centred under each chromosome's own span, below the panel, so the
+            # names never overlap the profile they describe.
+            contig_ticks=[
+                (contig_centers[contig], _chromosome_display_name(contig))
+                for contig in ordered_contigs
+                if contig in contig_centers
+            ],
         )
         if has_lollipops:
             _add_genome_panel_coverage_points(
@@ -2400,13 +2465,38 @@ def cnv_chromosome_fig_width_for_page(
     return page_width_inch - frame_padding_pt / 72.0
 
 
-def _panel_target_label(gene_row) -> str:
-    """Return the display label for a target-panel region."""
+def _panel_target_label(gene_row, configured_genes: Sequence[str] = ()) -> str:
+    """Return the display label for a target-panel region.
+
+    Panel names are composite where targets overlap, and naming the target after
+    its first component labels it for a bystander gene: MYC is drawn as CASC11,
+    NF1 as MIR4733HG, MLH1 as LRRFIP2, MSH2 as KCNK12. A reporting scientist
+    looking for the gene they configured does not find it.
+
+    When a component is one the site asked for in ``[cnv].genes``, that name is
+    used instead. Configured order breaks ties, so a target covering several
+    requested genes shows the first one listed.
+    """
     for key in ("gene", "name", "target"):
         if key in gene_row.index and pd.notna(gene_row[key]):
             raw = str(gene_row[key]).strip()
-            if raw and raw.lower() != "nan":
-                return raw.split(",")[0].strip()
+            if not raw or raw.lower() == "nan":
+                continue
+            parts = [
+                part.strip()
+                for part in raw.replace("/", ",").split(",")
+                if part.strip()
+            ]
+            if not parts:
+                continue
+            for gene in configured_genes:
+                want = str(gene).strip().casefold()
+                if not want:
+                    continue
+                for part in parts:
+                    if part.casefold() == want:
+                        return part
+            return parts[0]
     return ""
 
 
@@ -2463,6 +2553,7 @@ def _collect_panel_gene_points(
     use_max_abs: bool = False,
     target_coverage_df: Optional[pd.DataFrame] = None,
     cutoff_override: Optional[float] = None,
+    configured_genes: Sequence[str] = (),
 ) -> List[Dict[str, Any]]:
     """Collect panel target positions and a representative CNV per target."""
     if panel_genes_df is None or panel_genes_df.empty:
@@ -2473,7 +2564,7 @@ def _collect_panel_gene_points(
     points: List[Dict[str, Any]] = []
 
     for _, gene_row in genes.iterrows():
-        label_text = _panel_target_label(gene_row)
+        label_text = _panel_target_label(gene_row, configured_genes)
         if not label_text:
             continue
 
@@ -2643,6 +2734,7 @@ def iter_CNV_chromosome_figures(
     full_range_axis: bool = False,
     figure_legend: bool = True,
     clinical_trial_genes: Sequence[str] = (),
+    hide_unmappable_bands: bool = True,
 ):
     """Yields ``(chromosome, Figure)`` for each per-chromosome CNV plot.
 
@@ -2673,7 +2765,7 @@ def iter_CNV_chromosome_figures(
         full_range_axis: When True the chromosome's own page is drawn on the true
             data range rather than a percentile fit, so a deep event is shown at
             its real depth instead of being clipped to an edge marker.
-        figure_legend: When False the clinical-trial legend is not drawn on the
+        figure_legend: When False the Step 2 legend is not drawn on the
             figure. The report stacks four plots to a page and states it once in
             the body text instead, where it cannot collide with a title.
         full_range_pages: When True, a chromosome with bins outside the fixed
@@ -2725,6 +2817,8 @@ def iter_CNV_chromosome_figures(
         total_height = fig_height or cnv_chromosome_fig_height_for_page(9.34)
         total_width = fig_width or CNV_CHROMOSOME_FIG_WIDTH
 
+        from robin.analysis.cnv_regional import unmappable_bin_mask
+
         for contig in chromosomes:
             if contig not in cnv_source:
                 continue
@@ -2743,6 +2837,19 @@ def iter_CNV_chromosome_figures(
             plot_mask = np.isfinite(plot_values)
             positions_mb = positions_mb[plot_mask]
             plot_values = plot_values[plot_mask]
+            if hide_unmappable_bands:
+                # Bins the control profile cannot cover are the divisor-is-zero
+                # bins: their log2 ratio explodes and they scatter to -3..-5,
+                # burying the real profile and stretching the full-range axis.
+                # Bins overlapping a panel target are never hidden. Dropped from
+                # the plot only - values_array, segmentation and the reported
+                # calls are untouched.
+                unmappable = unmappable_bin_mask(
+                    contig, positions_mb * 1_000_000.0, report_plot_bin_width
+                )
+                if unmappable.any():
+                    positions_mb = positions_mb[~unmappable]
+                    plot_values = plot_values[~unmappable]
             if len(plot_values) == 0:
                 continue
             # Axis-independent work, so a chromosome drawn twice does it once.

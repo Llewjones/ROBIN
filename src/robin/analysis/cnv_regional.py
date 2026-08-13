@@ -71,6 +71,158 @@ def load_centromere_bed() -> pd.DataFrame:
         return pd.DataFrame(columns=columns)
 
 
+#: Control profile ROBIN normalises against. Bins with no coverage here are the
+#: divisor-is-zero bins whose log2 ratio explodes into the "rain" below the
+#: profile, so they are measured evidence of unmappability rather than an
+#: annotation guess. ``cenSatRegions.bed`` is far too wide for this (it spans
+#: PDGFRA, KIT, KDR, NF1 and SUZ12) and the cytoband stains are offset from
+#: where mappability actually fails.
+CONTROL_MAPPABILITY_RESOURCE = "HG01280_control_new.pkl"
+
+#: A plot bin is hidden when at least this fraction of its control bins are empty.
+UNMAPPABLE_CONTROL_FRACTION = 0.5
+
+
+@functools.lru_cache(maxsize=1)
+def _chromosome_lengths_from_cytobands() -> dict[str, int]:
+    bands = load_cytobands_bed()
+    if bands.empty:
+        return {}
+    try:
+        return bands.groupby("chrom")["end_pos"].max().astype(int).to_dict()
+    except Exception:
+        return {}
+
+
+@functools.lru_cache(maxsize=1)
+def load_control_mappability() -> dict[str, tuple[np.ndarray, int]]:
+    """Per contig: cumulative count of empty control bins, plus the bin size.
+
+    The cumulative form lets a plot bin of any width be scored with two lookups
+    instead of a slice. Returns an empty mapping when the control is missing, so
+    a missing resource shows everything rather than hiding it blindly.
+    """
+    path = _resource_path(CONTROL_MAPPABILITY_RESOURCE)
+    if not os.path.exists(path):
+        return {}
+    try:
+        import pickle
+
+        with open(path, "rb") as handle:
+            profile = pickle.load(handle)
+    except Exception:
+        logger.debug("Could not load control mappability profile", exc_info=True)
+        return {}
+
+    lengths = _chromosome_lengths_from_cytobands()
+    out: dict[str, tuple[np.ndarray, int]] = {}
+    for contig, counts in (profile or {}).items():
+        try:
+            arr = np.asarray(counts)
+            if arr.ndim != 1 or arr.size == 0:
+                continue
+            chrom_length = int(lengths.get(str(contig), 0))
+            if chrom_length <= 0:
+                continue
+            bin_size = int(round(chrom_length / arr.size))
+            if bin_size <= 0:
+                continue
+            empty = np.concatenate(
+                ([0], np.cumsum((arr == 0).astype(np.int64)))
+            )
+            out[str(contig)] = (empty, bin_size)
+        except Exception:
+            continue
+    return out
+
+
+@functools.lru_cache(maxsize=1)
+def load_protected_target_intervals() -> dict[str, tuple[tuple[int, int], ...]]:
+    """Merged intervals of every packaged panel target.
+
+    A bin overlapping one of these is never hidden, whatever the control says.
+    This is what makes target safety structural: it does not depend on the
+    threshold being lenient enough. TBL1X, for instance, has zero control
+    coverage across its whole length and no threshold would spare it.
+    """
+    import glob
+
+    directory = os.path.dirname(os.path.abspath(resources.__file__))
+    by_chrom: dict[str, list[list[int]]] = {}
+    for bed in sorted(glob.glob(os.path.join(directory, "*_panel_name_uniq.bed"))):
+        try:
+            with open(bed) as handle:
+                for line in handle:
+                    if line.startswith(("#", "track", "browser")):
+                        continue
+                    parts = line.rstrip("\n").split("\t")
+                    if len(parts) < 3:
+                        continue
+                    try:
+                        start, end = int(parts[1]), int(parts[2])
+                    except ValueError:
+                        continue
+                    if end > start:
+                        by_chrom.setdefault(parts[0], []).append([start, end])
+        except Exception:
+            logger.debug("Could not read panel bed %s", bed, exc_info=True)
+
+    merged: dict[str, tuple[tuple[int, int], ...]] = {}
+    for chrom, spans in by_chrom.items():
+        spans.sort()
+        acc: list[list[int]] = []
+        for start, end in spans:
+            if acc and start <= acc[-1][1]:
+                acc[-1][1] = max(acc[-1][1], end)
+            else:
+                acc.append([start, end])
+        merged[chrom] = tuple((s, e) for s, e in acc)
+    return merged
+
+
+def unmappable_bin_mask(
+    contig: str,
+    positions_bp,
+    bin_width_bp: int,
+    *,
+    threshold: float = UNMAPPABLE_CONTROL_FRACTION,
+    protect_targets: bool = True,
+) -> np.ndarray:
+    """True where a plot bin should be hidden as unmappable.
+
+    ``positions_bp`` are the plotted x of each bin and ``bin_width_bp`` its
+    span. ``downsample_cnv_for_plot`` returns bin centres, so the window scored
+    here is centred on the position rather than starting at it. A bin is hidden
+    when at least ``threshold`` of the control bins it covers are empty, unless
+    it overlaps a panel target.
+
+    Display only: the values stay in the track, in segmentation and in the
+    reported calls. Fails open - no control profile means nothing is hidden.
+    """
+    pos = np.asarray(positions_bp, dtype=float)
+    hide = np.zeros(pos.shape, dtype=bool)
+    entry = load_control_mappability().get(str(contig))
+    if entry is None or pos.size == 0 or bin_width_bp <= 0:
+        return hide
+
+    empty_cumsum, control_bin = entry
+    n_control = empty_cumsum.size - 1
+    half = bin_width_bp / 2.0
+    lo = np.clip(((pos - half) / control_bin).astype(np.int64), 0, n_control)
+    hi = np.clip(((pos + half) / control_bin).astype(np.int64), 0, n_control)
+    span = hi - lo
+    covered = span > 0
+    if not covered.any():
+        return hide
+    empty = empty_cumsum[hi[covered]] - empty_cumsum[lo[covered]]
+    hide[covered] = (empty / span[covered]) >= threshold
+
+    if protect_targets and hide.any():
+        for start, end in load_protected_target_intervals().get(str(contig), ()):
+            hide &= ~((pos - half < end) & (start < pos + half))
+    return hide
+
+
 @functools.lru_cache(maxsize=1)
 def load_centromere_boundaries() -> dict[str, int]:
     """Genomic position separating the p and q arms of each chromosome.

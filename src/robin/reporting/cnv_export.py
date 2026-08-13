@@ -41,7 +41,7 @@ def _load_npy_dict(path: Path) -> Optional[Dict[str, Any]]:
 
 
 def _default_clinical_trial_genes() -> Sequence[str]:
-    """Clinical trial target genes from workflow config, empty when unavailable."""
+    """Step 2 target genes from workflow config, empty when unavailable."""
     try:
         from robin.workflow_config import get_cnv_clinical_trial_genes
 

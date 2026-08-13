@@ -46,6 +46,7 @@ from robin.analysis.cnv_regional import (
     format_regional_event_table_row,
     is_reportable_chromosome,
     load_panel_gene_bed,
+    unmappable_bin_mask,
 )
 from robin.analysis.itd_work import load_gene_target_coverage
 from robin.classification_config import get_cnv_thresholds
@@ -157,8 +158,11 @@ _CNV_GENE_COVERAGE_FILTERS = (
     _CNV_GENE_COVERAGE_FILTER_ALL,
     _CNV_GENE_COVERAGE_FILTER_OUTLIERS,
 )
-_CNV_GENE_GAIN_COLOR = "#DC2626"
-_CNV_GENE_LOSS_COLOR = "#2563EB"
+# Gains orange, losses green - the same convention the PDF reports use, so a
+# gene reads the same way on screen and on paper. These previously ran the other
+# way round from the report (gain red, loss blue).
+_CNV_GENE_GAIN_COLOR = "#EA580C"
+_CNV_GENE_LOSS_COLOR = "#15803D"
 # Soft safety only — axis auto-scales to highlighted genes within this envelope.
 _CNV_LOLLIPOP_LOG_Y_SOFT_CAP = 20.0
 _CNV_LOLLIPOP_LINEAR_Y_SOFT_CAP_FACTOR = 20.0
@@ -1743,9 +1747,25 @@ def _build_cnv_track_scatter_series(
     plot_bin_width: int,
     chrom_palette: List[str],
     filter_finite: bool = False,
+    hide_unmappable_bands: bool = True,
 ) -> List[Dict[str, Any]]:
     """Build ECharts scatter series for a per-chromosome CNV track."""
     series: List[Dict[str, Any]] = []
+
+    def _drop_unmappable(contig: str, x_bp: np.ndarray, vals: np.ndarray):
+        """Hide bins with no uniquely mappable sequence.
+
+        Bins the control profile cannot cover scatter far below the profile
+        because their divisor is zero. Panel targets are never hidden. Display
+        only - the track itself is unchanged.
+        """
+        if not hide_unmappable_bands:
+            return x_bp, vals
+        drop = unmappable_bin_mask(contig, x_bp, int(plot_bin_width))
+        if not drop.any():
+            return x_bp, vals
+        return x_bp[~drop], vals[~drop]
+
     if selected == "All":
         offset_bp = 0
         dj = 0
@@ -1755,6 +1775,7 @@ def _build_cnv_track_scatter_series(
             x_local, vals = downsample_cnv_for_plot(
                 np.asarray(cnv), binw_analysis, int(plot_bin_width)
             )
+            x_local, vals = _drop_unmappable(contig, x_local, vals)
             x_global = offset_bp + x_local
             if filter_finite:
                 pts = [
@@ -1781,6 +1802,7 @@ def _build_cnv_track_scatter_series(
             x_local, vals = downsample_cnv_for_plot(
                 np.asarray(cnv), binw_analysis, int(plot_bin_width)
             )
+            x_local, vals = _drop_unmappable(selected, x_local, vals)
             if filter_finite:
                 pts = [
                     [float(x), float(v)]
@@ -2612,7 +2634,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
             pass
 
         ui.separator().classes("mgmt-detail-separator")
-        ngtd_label = ui.label("NGTD and clinical trial targets CNVs").classes(
+        ngtd_label = ui.label("NGTD and Step 2 targets CNVs").classes(
             "target-coverage-panel__meta-label mt-2 mb-1"
         )
         ngtd_summary = ui.label("Awaiting CNV data").classes(
@@ -3152,7 +3174,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
         called = sum(1 for row in rows if row["state"] in ("GAIN", "LOSS"))
         _set_cutoff_heading(
             ngtd_label,
-            "NGTD and clinical trial targets CNVs",
+            "NGTD and Step 2 targets CNVs",
             _resolve_cnv_cutoff(state.get("cutoff")),
         )
         ngtd_summary.set_text(

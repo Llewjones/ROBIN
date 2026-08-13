@@ -18,7 +18,7 @@ WORKFLOW_REQUIRED_KEYS = ("path", "workflow", "center", "target_panel")
 DEFAULT_CNV_PENALTY_VALUE = 10
 # Minimum adjacent same-sign bins for a gain/loss region (|CNV| > 0.5).
 DEFAULT_CNV_MIN_CONTIGUOUS_BINS = 1
-# Panel genes that are current clinical trial targets. Highlighted distinctly on
+# Panel genes that are current Step 2 targets. Highlighted distinctly on
 # CNV figures in PDF reports so a reporting scientist can see at a glance which
 # altered genes have a trial route. Override per site with
 # ``[cnv].clinical_trial_genes``; set it to an empty list to disable.
@@ -418,7 +418,7 @@ def get_cnv_clinical_trial_genes(
     *,
     environ: Optional[Mapping[str, str]] = None,
 ) -> tuple[str, ...]:
-    """Resolve clinical trial target genes from ``[cnv].clinical_trial_genes``.
+    """Resolve Step 2 target genes from ``[cnv].clinical_trial_genes``.
 
     Falls back to the packaged default list when the key is absent. An explicitly
     empty list disables the highlighting.
@@ -429,7 +429,7 @@ def get_cnv_clinical_trial_genes(
     return parse_cnv_genes(cnv_section.get("clinical_trial_genes"))
 
 
-#: Genes listed in the "NGTD and Clinical Trial Targets CNVs" report table.
+#: Genes listed in the "NGTD and Step 2 Targets CNVs" report table.
 #: A ``/`` joins overlapping transcripts at one locus (for example
 #: ``CDKN2B/CDKN2B-AS1``): they share the same CNV bins, so they cannot be told
 #: apart at this resolution and are reported as a single row.
@@ -490,7 +490,7 @@ def get_cnv_ngtd_genes(
     *,
     environ: Optional[Mapping[str, str]] = None,
 ) -> tuple[str, ...]:
-    """Resolve the NGTD / clinical trial target list from ``[cnv].ngtd_genes``.
+    """Resolve the NGTD / Step 2 target list from ``[cnv].ngtd_genes``.
 
     Falls back to the packaged default when the key is absent; an explicitly
     empty list suppresses the table.
