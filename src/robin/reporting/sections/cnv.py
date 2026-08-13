@@ -26,6 +26,7 @@ from reportlab.platypus import (
 from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
 from ..sections.base import ReportSection
+from robin.cnv_plot_style import CNV_CHROMOSOME_AXIS_LOG2
 from ..plotting import (
     create_CNV_plot,
     create_CNV_plot_per_chromosome,
@@ -1256,8 +1257,14 @@ class CNVSection(ReportSection):
                     # report is read one chromosome at a time, so true depth
                     # matters more than comparability between them. The fixed
                     # window remains on the live view and the Chromosome PDFs.
-                    fixed_axis_log2=None,
-                    full_range_axis=True,
+                    # Zoomed to the fixed window in the report body: the
+                    # full-range view flattens ordinary gains and losses to
+                    # accommodate a handful of extreme bins. Both views are
+                    # still available in the downloadable per-chromosome PDF,
+                    # which adds a full-range page whenever bins fall outside
+                    # this window.
+                    fixed_axis_log2=CNV_CHROMOSOME_AXIS_LOG2,
+                    full_range_axis=False,
                     # Four plots to a page, so the purple legend is stated once
                     # in the body text below instead of on every figure, where
                     # it collided with the chromosome titles.
