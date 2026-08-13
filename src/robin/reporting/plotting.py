@@ -1898,30 +1898,28 @@ def _scatter_cnv_genome_points(
     *,
     color_by_state: bool,
     show_trend: bool = True,
-    arm_levels: Optional[Dict[str, Dict[str, float]]] = None,
 ) -> None:
     """Scatter genome-wide CNV points, optionally coloured by threshold state."""
     if show_trend and "contig" in df.columns:
         # One trace per chromosome so the trend never bridges a chromosome boundary.
         for _contig, subset in df.groupby("contig", sort=False):
             ordered = subset.sort_values("position_bp")
-            # One level per arm, at the arm mean, so the genome-wide figure and
-            # the arm / whole-chromosome table cannot disagree about the same
-            # arm. Finer segmentation here tracks coverage structure rather than
-            # copy number; the per-chromosome pages keep the detailed line.
-            spans = cnv_arm_mean_spans(
+            # The same segmented line the per-chromosome pages draw, rather than
+            # one level per arm. An arm mean averages a sub-arm event with the
+            # quiet sequence beside it and draws the line below its own gain: on
+            # a real sample 19p averaged +0.26 over a +0.48 block at 19.9-24.2 Mb
+            # and a +0.22 remainder, so the line ran under the visible cluster.
+            #
+            # The cost is that this line and the arm / whole-chromosome table are
+            # no longer guaranteed to show the same level for an arm, because
+            # they are answering different questions - the table calls the arm,
+            # the line follows the profile. The table remains the authority for
+            # arm-level calls.
+            spans = cnv_segment_spans(
                 np.asarray(ordered["position_bp"], dtype=float),
                 np.asarray(ordered["ploidy"], dtype=float),
                 split_at=_centromere_split(_contig, 1.0),
             )
-            # Replace each arm's level with the value the table called on.
-            called = (arm_levels or {}).get(str(_contig))
-            if called and spans:
-                names = ["p", "q"] if len(spans) == 2 else ["q"]
-                spans = [
-                    (s, e, called.get(name, level))
-                    for (s, e, level), name in zip(spans, names)
-                ]
             if spans:
                 ax.hlines(
                     [level for _s, _e, level in spans],
@@ -2320,9 +2318,6 @@ def build_CNV_genome_figure(
             df,
             color_by_state=plot_normalized,
             show_trend=show_trend,
-            arm_levels=_arm_levels_from_calling_track(
-                getattr(result, "cnv", None), analysis_bin_width, sex_estimate
-            ),
         )
 
         for boundary in contig_boundaries[:-1]:

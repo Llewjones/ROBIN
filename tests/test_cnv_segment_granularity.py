@@ -116,3 +116,46 @@ def test_stepped_track_recovers_its_levels():
 @pytest.mark.parametrize("n", [0, 1, 2, 5])
 def test_short_tracks_do_not_raise(n):
     assert isinstance(cnv_segment_bounds(np.zeros(n)), list)
+
+
+# ---------------------------------------------------------------- genome panel
+
+def test_genome_panel_draws_the_segmented_line():
+    """It used to draw one level per arm, which ran below its own gain.
+
+    On a real sample chr19p averaged +0.26 across a +0.48 block and a +0.22
+    remainder, so the line sat under the visible gain cluster.
+    """
+    import inspect
+
+    from robin.reporting.plotting import _scatter_cnv_genome_points
+
+    source = inspect.getsource(_scatter_cnv_genome_points)
+    assert "cnv_segment_spans" in source
+    assert "cnv_arm_mean_spans" not in source
+
+
+def test_a_sub_arm_gain_gets_its_own_level():
+    """The chr19 case: a block inside an arm must not be averaged away."""
+    import numpy as np
+
+    from robin.cnv_plot_style import cnv_arm_mean_spans, cnv_segment_spans
+
+    rng = np.random.default_rng(20)
+    positions = np.arange(0, 24_000_000, 50_000, dtype=float)
+    values = np.concatenate([
+        rng.normal(0.22, 0.10, 400),
+        rng.normal(0.48, 0.10, positions.size - 400),
+    ])
+
+    arm = cnv_arm_mean_spans(positions, values)
+    segmented = cnv_segment_spans(positions, values)
+
+    # The arm mean lands between the two levels - under the higher block.
+    assert len(arm) == 1
+    assert 0.25 < arm[0][2] < 0.45
+
+    # The segmented line resolves both.
+    levels = [level for _s, _e, level in segmented]
+    assert any(level > 0.42 for level in levels), levels
+    assert any(level < 0.30 for level in levels), levels
