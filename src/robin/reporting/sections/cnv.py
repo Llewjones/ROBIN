@@ -323,11 +323,27 @@ class CNVSection(ReportSection):
             )
         )
         self.elements.append(Spacer(1, 2))
+        # Purple marks a Step 2 target, matching the gene markers on the plots so
+        # the table and the figures read the same way.
+        try:
+            from robin.reporting.plotting import _panel_label_matches_configured
+            from robin.workflow_config import get_cnv_clinical_trial_genes
+
+            step2_genes = tuple(get_cnv_clinical_trial_genes())
+        except Exception:
+            logger.debug("Could not resolve Step 2 target genes", exc_info=True)
+            step2_genes = ()
+
         table_rows = [["Gene", "Chr", "Log2 ratio", "Result"]]
+        any_step2 = False
         for row in rows:
+            gene = str(row["gene"])
+            if step2_genes and _panel_label_matches_configured(gene, step2_genes):
+                any_step2 = True
+                gene = f'<font color="{CNV_REPORT_TRIAL_LEGEND_COLOR}"><b>{gene}</b></font>'
             table_rows.append(
                 [
-                    row["gene"],
+                    gene,
                     row["chrom"] or "--",
                     f"{row['value']:+.2f}" if row["value"] is not None else "--",
                     row["state"],
@@ -344,7 +360,12 @@ class CNVSection(ReportSection):
                 f"&quot;{CNV_GENE_NOT_LOCATED_LABEL}&quot; means it is not a target on this "
                 f"sample's panel and so was not assessed \u2014 that is not the same as no change. "
                 f"The value shown is the most extreme bin overlapping the gene, matching the "
-                f"gene markers on the plots.",
+                f"gene markers on the plots."
+                + (
+                    " Genes in purple are current Step 2 targets."
+                    if any_step2
+                    else ""
+                ),
                 ParagraphStyle(
                     "NGTDNote",
                     parent=self.styles.styles["Normal"],
