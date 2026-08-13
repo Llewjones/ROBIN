@@ -10,6 +10,8 @@ import os
 from typing import Any, Dict, List, Optional
 
 from reportlab.platypus import Paragraph, Spacer
+from reportlab.lib.colors import HexColor
+from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import inch
 
 from robin.analysis.mnpflex_docker import hierarchy_aggregate_display
@@ -26,6 +28,12 @@ from robin.reporting.mnpflex_hierarchy import (
 from .base import ReportSection
 
 logger = logging.getLogger(__name__)
+
+#: Score at or above which an MNP-Flex call is reported as high confidence.
+#: MNP-Flex is not in CLASSIFIER_CONFIDENCE_THRESHOLDS - it has no High/Medium/
+#: Low tiers - so this is stated as a note under its own section rather than in
+#: the methylation classification table.
+MNPFLEX_HIGH_CONFIDENCE_SCORE = 0.30
 
 
 class MNPFlexSection(ReportSection):
@@ -158,6 +166,19 @@ class MNPFlexSection(ReportSection):
                 hierarchy,
                 styles=self.styles,
                 format_score=self._format_score,
+            )
+            self.elements.append(Spacer(1, 4))
+            self.elements.append(
+                Paragraph(
+                    f"Note: High Confidence Result = &gt;{MNPFLEX_HIGH_CONFIDENCE_SCORE:.2f}",
+                    ParagraphStyle(
+                        "MNPFlexConfidenceNote",
+                        parent=self.styles.styles["Normal"],
+                        fontSize=8,
+                        leading=10,
+                        textColor=HexColor("#4B5563"),
+                    ),
+                )
             )
 
         # Export frames for CSV/XLSX/ZIP artifacts
