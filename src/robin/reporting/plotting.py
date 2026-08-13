@@ -84,8 +84,19 @@ CNV_POINT_ALPHA_NEUTRAL = 0.38
 CNV_POINT_ALPHA_CALLED = 0.72
 CNV_POINT_ALPHA_DEFAULT = 0.45
 
+#: Gene names are inked darker than the marker they name. On the genome panel a
+#: name sits directly on the bin scatter, which uses these same gain/loss blues
+#: and reds, so a label in the marker's own colour sinks into the cloud. The
+#: marker keeps the convention colour; only the text is darkened, and the white
+#: halo below carries the rest of the separation.
+CNV_LABEL_INK = {
+    "plot_gain": "#0B2A6F",
+    "plot_loss": "#7A0F0F",
+    "plot_trial": "#5B1A94",
+}
+
 _CNV_GENE_LABEL_PATH_EFFECTS = [
-    mpath_effects.withStroke(linewidth=2.6, foreground="white", alpha=0.95),
+    mpath_effects.withStroke(linewidth=3.0, foreground="white", alpha=0.98),
 ]
 CNV_FONT = {
     "title": 11,
@@ -987,7 +998,7 @@ def _add_panel_coverage_points(
     )
     for point in coverage_points:
         x_pos = float(point[x_key])
-        color = _panel_point_color(point)
+        color = _panel_label_color(point)
         label_y = head_label_y[(point["label"], x_pos)]
         above = label_y >= float(point["y_norm"])
         ax_cnv.text(
@@ -1029,6 +1040,20 @@ def _panel_point_color(point: Dict[str, Any]) -> str:
         if point.get("direction") == "gain"
         else CNV_COLORS["plot_loss"]
     )
+
+
+def _panel_label_color(point: Dict[str, Any]) -> str:
+    """Ink for a panel gene's name.
+
+    The same convention as its marker - purple for a Step 2 target, otherwise
+    gain/loss - but darker, so the name stays readable where it overlies bins
+    of its own colour.
+    """
+    marker = _panel_point_color(point)
+    for key, ink in CNV_LABEL_INK.items():
+        if marker == CNV_COLORS[key]:
+            return ink
+    return marker
 
 
 def _gene_cnv_direction(
