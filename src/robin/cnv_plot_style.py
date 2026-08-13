@@ -154,7 +154,22 @@ def gene_bin_window(start_bin: int, stop_bin: int, n_bins: int,
 
 # CNV_SEGMENT_MIN_BINS keeps focal events (a four-bin CDKN2A deletion) callable.
 CNV_SEGMENT_MIN_BINS = 3
-CNV_SEGMENT_PENALTY = 20.0
+
+#: How much of the bin-to-bin noise variance a split must explain to be kept.
+#:
+#: Lowered from 20 to 10 at the analysts' request: the line was averaging across
+#: real steps and reading as a coarse level rather than following the profile.
+#: On a chr1 track of 4,493 display bins this takes the line from 62 segments at
+#: a 1.8 Mb median to 110 at 1.3 Mb.
+#:
+#: 10 rather than lower because ``CNV_SEGMENT_MERGE_SIGMAS`` below is what stops
+#: the line stepping with noise, and that guard is left untouched: a split still
+#: has to survive the merge test afterwards. Going to 5 with a weaker merge gave
+#: 147 segments, where the line starts tracking scatter instead of structure.
+#: It also matches ``DEFAULT_CNV_PENALTY_VALUE``, the penalty the calling
+#: segmentation already uses, so the drawn line and the calls agree on how
+#: readily a step is worth believing.
+CNV_SEGMENT_PENALTY = 10.0
 
 #: A jump between consecutive x positions larger than this multiple of the median
 #: spacing is treated as a gap in coverage, and a segment may not cross it. The
