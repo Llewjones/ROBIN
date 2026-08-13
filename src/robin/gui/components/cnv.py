@@ -4826,6 +4826,38 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
                 return ev.value
             return args if args is not None else default
 
+        def _select_key(ev, widget, default=None):
+            """Option key behind a select event, not its visible label.
+
+            ``_val`` returns the label, which is only the same thing when a
+            select's keys equal its labels. The cut-off, axis and gene-label
+            selects are ``{key: label}`` maps - ``{"0.6": "\u00b10.6"}``,
+            ``{"3.5": "Tiny (3.5 pt)"}`` - so the label reached the state, the
+            downstream float() raised, the value silently fell back to the
+            default and the control appeared to do nothing.
+
+            Reading ``widget.value`` alone is not enough either: the handler is
+            bound to both ``change`` and ``update:model-value`` and NiceGUI does
+            not guarantee it has synced the widget before either fires, so a
+            stale value can be read back over a good one.
+            """
+            options = getattr(widget, "options", None) or {}
+            keys = {str(key) for key in options}
+            raw = _val(ev, None)
+            if isinstance(raw, dict):
+                raw = raw.get("value", raw.get("label"))
+            if raw is not None:
+                text = str(raw)
+                if text in keys:
+                    return text
+                for key, label in options.items():
+                    if str(label) == text:
+                        return str(key)
+            current = getattr(widget, "value", None)
+            if current is not None and str(current) in keys:
+                return str(current)
+            return default
+
         def _switch_bool(ev, *, default: bool = False) -> bool:
             """Read a ui.switch boolean, falling back to the widget value if needed."""
             raw = _val(ev, None)
@@ -4884,15 +4916,7 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
 
         def _on_cutoff(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
-            value = _val(ev, "calling")
-            if isinstance(value, dict):
-                value = value.get("value", value.get("label"))
-            st["cutoff"] = str(value or "calling")
-            try:
-                if getattr(cnv_cutoff, "value", None):
-                    st["cutoff"] = str(cnv_cutoff.value)
-            except Exception:
-                pass
+            st["cutoff"] = _select_key(ev, cnv_cutoff, "calling")
             st["_force_chrom_refresh"] = True
             _force_redraw_with_marker_autoscale()
 
@@ -4913,43 +4937,19 @@ def add_cnv_section(launcher: Any, sample_dir: Path) -> None:
 
         def _on_gene_label(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
-            value = _val(ev, "4.5")
-            if isinstance(value, dict):
-                value = value.get("value", value.get("label"))
-            st["gene_label_size"] = str(value or "4.5")
-            try:
-                if getattr(cnv_gene_label, "value", None):
-                    st["gene_label_size"] = str(cnv_gene_label.value)
-            except Exception:
-                pass
+            st["gene_label_size"] = _select_key(ev, cnv_gene_label, "4.5")
             st["_force_chrom_refresh"] = True
             _force_redraw_with_marker_autoscale()
 
         def _on_chrom_axis(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
-            value = _val(ev, "2")
-            if isinstance(value, dict):
-                value = value.get("value", value.get("label"))
-            st["chrom_axis"] = str(value or "2")
-            try:
-                if getattr(cnv_chrom_axis, "value", None):
-                    st["chrom_axis"] = str(cnv_chrom_axis.value)
-            except Exception:
-                pass
+            st["chrom_axis"] = _select_key(ev, cnv_chrom_axis, "2")
             st["_force_chrom_refresh"] = True
             _force_redraw_with_marker_autoscale()
 
         def _on_genome_axis(ev):
             st = launcher._cnv_state.setdefault(str(sample_dir), {})
-            value = _val(ev, "auto")
-            if isinstance(value, dict):
-                value = value.get("value", value.get("label"))
-            st["genome_axis"] = str(value or "auto")
-            try:
-                if getattr(cnv_genome_axis, "value", None):
-                    st["genome_axis"] = str(cnv_genome_axis.value)
-            except Exception:
-                pass
+            st["genome_axis"] = _select_key(ev, cnv_genome_axis, "auto")
             _force_redraw_with_marker_autoscale()
 
         def _on_trend(ev):
